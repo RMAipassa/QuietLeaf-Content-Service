@@ -1,19 +1,16 @@
 from __future__ import annotations
 
 import re
-import time
-from typing import Callable
-from urllib.parse import quote, urljoin, urlsplit
+from urllib.parse import quote, urlsplit
 
 from bs4 import BeautifulSoup
 
-from .adapters import MAX_TEXT_BYTES, HtmlSource, SourceError, require_id
+from .adapters import HtmlSource, SourceError, require_id
 
 
 class NovelPingSource(HtmlSource):
     def __init__(self, base_url: str = "https://novelping.com", search_path: str = "/search?keyword={query}", client=None,
-                 image_hosts: tuple[str, ...] = (), access_authorized: bool = False,
-                 renderer: Callable[[str], str] | None = None):
+                 image_hosts: tuple[str, ...] = (), access_authorized: bool = False):
         if not search_path.startswith("/") or not search_path.count("{query}") == 1 or search_path.startswith("//"):
             raise SourceError("Invalid search path")
         trusted_image_hosts = tuple(dict.fromkeys(("images.novelping.com", *image_hosts)))
@@ -30,82 +27,12 @@ class NovelPingSource(HtmlSource):
         self.search_path = search_path
         self.agent = "QuietLeafPersonalReader/0.3"
         self.access_authorized = access_authorized
-        self._renderer = renderer or self._render_with_browser
-        self._render_cache: dict[str, tuple[float, str]] = {}
 
     def _page(self, path: str) -> BeautifulSoup:
         target = self._guard_url(path)
         if not self.access_authorized or not urlsplit(target).path.startswith("/book/"):
             return super()._page(path)
-        return BeautifulSoup(self._authorized_html(target), "html.parser")
-
-    def _authorized_html(self, target: str) -> str:
-        with self._lock:
-            now = time.monotonic()
-            cached = self._render_cache.get(target)
-            if cached and now - cached[0] < 60:
-                return cached[1]
-            delay = self.min_interval - (now - self._last_request)
-            if delay > 0:
-                time.sleep(delay)
-            self._last_request = time.monotonic()
-            html = self._renderer(target)
-            if not isinstance(html, str) or len(html.encode("utf-8")) > MAX_TEXT_BYTES:
-                raise SourceError("Rendered page is invalid or too large")
-            self._render_cache[target] = (time.monotonic(), html)
-            if len(self._render_cache) > 32:
-                oldest = min(self._render_cache, key=lambda url: self._render_cache[url][0])
-                self._render_cache.pop(oldest, None)
-            return html
-
-    def _render_with_browser(self, target: str) -> str:
-        try:
-            from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-            from playwright.sync_api import sync_playwright
-        except ImportError as exc:
-            raise SourceError("Authorized browser rendering is not installed") from exc
-
-        try:
-            with sync_playwright() as playwright:
-                browser = playwright.chromium.launch(
-                    headless=True,
-                    args=["--no-sandbox", "--disable-dev-shm-usage"],
-                )
-                try:
-                    context = browser.new_context(
-                        user_agent=self.agent,
-                        java_script_enabled=True,
-                        service_workers="block",
-                    )
-
-                    def restrict_request(route, request):
-                        url = urlsplit(request.url)
-                        same_origin = (url.scheme == "https" and url.hostname == self.host and
-                                       url.port in (None, 443) and not url.username and not url.password)
-                        redirected_navigation = request.is_navigation_request() and request.url != target
-                        if not same_origin or redirected_navigation or request.resource_type in {"image", "media", "font"}:
-                            route.abort()
-                        else:
-                            route.continue_()
-
-                    context.route("**/*", restrict_request)
-                    page = context.new_page()
-                    response = page.goto(target, wait_until="domcontentloaded", timeout=30_000)
-                    if response is None or response.status != 200 or page.url != target:
-                        raise SourceError("Authorized page is unavailable or redirected")
-                    try:
-                        page.wait_for_load_state("networkidle", timeout=5_000)
-                    except PlaywrightTimeoutError:
-                        pass
-                    return page.content()
-                finally:
-                    browser.close()
-        except SourceError:
-            raise
-        except PlaywrightTimeoutError as exc:
-            raise SourceError("Authorized browser request timed out") from exc
-        except Exception as exc:
-            raise SourceError("Authorized browser request failed") from exc
+        return BeautifulSoup(self._fetch(target), "html.parser")
 
     def _book_id(self, url: str) -> str | None:
         parts = urlsplit(self._guard_url(url)).path.strip("/").split("/")
@@ -251,7 +178,11 @@ class NovelPingSource(HtmlSource):
 
     def chapters(self, book_id: str) -> list[dict]:
         book_id = require_id(book_id)
-        page = self._page(f"/book/{book_id}")
+        if self.access_authorized:
+            target = self._guard_url(f"/ajax/chapter-archive?novelId={quote(book_id, safe='')}")
+            page = BeautifulSoup(self._fetch(target), "html.parser")
+        else:
+            page = self._page(f"/book/{book_id}")
         prefix = f"/book/{book_id}/"
         chapters = {}
         for link in page.select('a[href*="/book/"]'):
@@ -274,7 +205,7 @@ class NovelPingSource(HtmlSource):
                                     title.casefold() not in {"read", "read now"}):
                 chapters[chapter_id] = item
         if not chapters:
-            raise SourceError("No chapter links found in the page HTML; the list may load dynamically")
+            raise SourceError("No chapter links found in the NovelPing chapter archive")
         chapters = list(chapters.values())
         if all(item[0] is not None for item in chapters):
             chapters.sort(key=lambda item: (item[0], item[1]))

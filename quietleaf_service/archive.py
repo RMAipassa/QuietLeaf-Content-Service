@@ -218,6 +218,10 @@ class ArchiveStore:
                               (*params, limit)).fetchall()
         return [self._book_row(r) for r in rows]
 
+    def book_count(self) -> int:
+        with self._connect() as db:
+            return int(db.execute("SELECT COUNT(*) FROM books").fetchone()[0])
+
     def stats(self, source: str, book_id: str):
         book = self.book(source, book_id)
         if book is None:

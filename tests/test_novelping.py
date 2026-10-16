@@ -21,6 +21,19 @@ BOOK_HTML = '''
   <a href="https://evil.example/book/test-novel/chapter-3">Evil</a>
 </section>
 '''
+CHAPTER_ARCHIVE_HTML = '''
+<template data-chapter-item-template>
+  <a href="/book/test-novel/chapter-12-goodbye">Chapter 12 Goodbye</a>
+  <a href="/book/test-novel/chapter-2-second">Chapter 2 Second</a>
+  <a href="/book/test-novel/chapter-1-hello">Chapter 1 Hello</a>
+  <a href="/book/test-novel/chapter-999-archive-only">Chapter 999 Archive Only</a>
+</template>
+'''
+PREVIEW_HTML = '''
+<h1>Test Novel</h1>
+<div class="details"><span>Author:</span><a>Demo Writer</a></div>
+<a href="/book/test-novel/chapter-1-hello">Chapter 1 Hello</a>
+'''
 CHAPTER_HTML = '''
 <h1>Chapter 1</h1>
 <div class="chapter-content"><p>This is the first paragraph of our completely original test chapter and
@@ -101,12 +114,21 @@ def test_novelping_obeys_robots_and_never_bypasses_redirects():
         adapter.recent()
 
 
-def test_authorized_browser_mode_is_explicit_and_limited_to_book_pages():
+def test_authorized_mode_is_explicit_and_uses_the_full_chapter_archive():
+    requested = []
+
     def restricted(request):
+        requested.append(str(request.url))
         if request.url.path == "/robots.txt":
             return httpx.Response(200, text="User-agent: *\nAllow: /search\nDisallow: /book/\n")
         if request.url.path == "/search":
             return httpx.Response(200, text='<a href="/book/test-novel">Test Novel</a>')
+        if request.url.path == "/book/test-novel":
+            return httpx.Response(200, text=PREVIEW_HTML)
+        if request.url.path == "/book/test-novel/chapter-1-hello":
+            return httpx.Response(200, text=CHAPTER_HTML)
+        if request.url.path == "/ajax/chapter-archive" and request.url.params.get("novelId") == BOOK:
+            return httpx.Response(200, text=CHAPTER_ARCHIVE_HTML)
         return httpx.Response(500)
 
     client = httpx.Client(transport=httpx.MockTransport(restricted), follow_redirects=False)
@@ -115,26 +137,38 @@ def test_authorized_browser_mode_is_explicit_and_limited_to_book_pages():
     with pytest.raises(SourceError, match="robots.txt"):
         blocked.details(BOOK)
 
-    rendered = []
-
-    def render(url):
-        rendered.append(url)
-        return CHAPTER_HTML if url.endswith("chapter-1-hello") else BOOK_HTML
-
-    authorized = NovelPingSource(client=client, access_authorized=True, renderer=render)
+    authorized = NovelPingSource(client=client, access_authorized=True)
     authorized.min_interval = 0
     assert authorized.search("Test")[0]["id"] == BOOK
     assert authorized.details(BOOK)["title"] == "Test Novel"
-    assert len(authorized.chapters(BOOK)) == 3
+    chapters = authorized.chapters(BOOK)
+    assert len(chapters) == 4
+    assert chapters[-1]["id"] == "chapter-999-archive-only"
     assert "first paragraph" in authorized.text(BOOK, "chapter-1-hello")
-    assert rendered == [
-        "https://novelping.com/book/test-novel",
-        "https://novelping.com/book/test-novel/chapter-1-hello",
-    ]
+    assert "https://novelping.com/ajax/chapter-archive?novelId=test-novel" in requested
 
 
-def test_authorized_browser_mode_rejects_oversized_pages():
-    adapter = NovelPingSource(access_authorized=True, renderer=lambda _: "x" * (2 * 1024 * 1024 + 1))
+def test_authorized_mode_rejects_an_unavailable_full_chapter_archive():
+    def unavailable(request):
+        return httpx.Response(503)
+
+    adapter = NovelPingSource(
+        client=httpx.Client(transport=httpx.MockTransport(unavailable), follow_redirects=False),
+        access_authorized=True,
+    )
+    adapter.min_interval = 0
+    with pytest.raises(SourceError, match="HTTP 503"):
+        adapter.chapters(BOOK)
+
+
+def test_authorized_mode_rejects_oversized_pages():
+    def oversized(_request):
+        return httpx.Response(200, text="x" * (2 * 1024 * 1024 + 1))
+
+    adapter = NovelPingSource(
+        client=httpx.Client(transport=httpx.MockTransport(oversized), follow_redirects=False),
+        access_authorized=True,
+    )
     adapter.min_interval = 0
     with pytest.raises(SourceError, match="too large"):
         adapter.details(BOOK)

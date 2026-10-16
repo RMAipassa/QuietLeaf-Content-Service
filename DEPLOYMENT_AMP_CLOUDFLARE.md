@@ -1,151 +1,157 @@
-# AMP Host and Cloudflare Tunnel Deployment
+# AMP Generic Instance and Cloudflare Tunnel Deployment
 
-## Recommended architecture
-
-Run the QuietLeaf content service with Docker Compose alongside AMP, rather than inside an AMP Generic instance:
+QuietLeaf can run directly inside a CubeCoders AMP Generic instance. Docker is not required.
 
 ```text
-Android -> https://books.example.com -> Cloudflare Tunnel -> 127.0.0.1:8765 -> QuietLeaf container
+Android or browser -> https://books.example.com -> Cloudflare Tunnel
+                   -> 127.0.0.1:8765 -> AMP Generic instance -> QuietLeaf/Uvicorn
 ```
 
-AMP manages game/application instances, but it is not a Docker Compose orchestrator. Running Compose from an AMP Generic instance would require broad Docker socket access and would make AMP monitor Compose instead of the API. Keep AMP and QuietLeaf isolated on the same Linux host.
+The process stays in the foreground so AMP can monitor, stop, and restart it. Run exactly one Uvicorn worker because the archive scheduler and SQLite store are designed for one service process.
 
 ## Prerequisites
 
-- An x86-64 Linux AMP host with SSH or console access.
-- Docker Engine and Docker Compose v2.
-- A domain using Cloudflare DNS.
-- `cloudflared` installed on the host.
-- At least 2 CPU cores, 2 GiB free RAM, and enough disk for the container image and archive.
-- Outbound HTTPS/DNS and outbound TCP/UDP 7844 for Cloudflare Tunnel.
-- Explicit permission before enabling authorized NovelPing browser access or archiving content.
+- A Linux AMP host with a Generic instance.
+- Python 3.11 or newer with the `venv` module.
+- Outbound HTTPS and DNS access.
+- A Cloudflare Tunnel connector on the same host, if the service must be reachable remotely.
+- Explicit permission before enabling authorized NovelPing access or archiving content.
 
-Do not open inbound port 8765. The supplied Compose file binds it only to loopback.
+The service binds to loopback by default. Do not open its port in the public firewall.
 
-## 1. Prepare persistent paths
+## 1. Put the release in the AMP instance
 
-Use stable host paths rather than an AMP instance directory:
+Upload or clone this repository into a persistent directory owned by the AMP instance user. The directory must contain `pyproject.toml`, `amp-start.sh`, `catalog/`, and `quietleaf_service/`.
 
-```text
-/opt/quietleaf/service       application release
-/srv/quietleaf/catalog       catalog files
-/srv/quietleaf/archive       SQLite archive and covers
-/etc/quietleaf/quietleaf.env secrets and runtime settings
+Do not place the release in a temporary update directory. The default SQLite archive is stored under `archive/` inside this directory and must survive restarts and updates.
+
+## 2. Install the Python environment
+
+From the service directory, run:
+
+```bash
+sh install-amp.sh
 ```
 
-Copy `catalog` and any existing `archive` contents before the first start. Protect the environment file with mode `0600`.
+Re-run the same install command after pulling a release that changes Python dependencies. Do not run it on every service start.
 
-Example `/etc/quietleaf/quietleaf.env`:
+## 3. Configure the instance
+
+Copy `amp.env.example` to `.env` and generate a long random token:
+
+```bash
+umask 077
+cp amp.env.example .env
+python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+```
+
+Put the generated value after `QUIETLEAF_API_TOKEN=` in `.env`. Protect that file so only the AMP instance user can read it:
+
+```bash
+chmod 600 .env
+```
+
+Important settings:
 
 ```dotenv
-QUIETLEAF_API_TOKEN=<long-random-token-from-a-password-manager>
+QUIETLEAF_API_TOKEN=<long-random-token>
+PORT=8765
 QUIETLEAF_ARCHIVE_MAX_BYTES=2147483648
-QUIETLEAF_FOLLOW_INTERVAL_SECONDS=3600
-QUIETLEAF_ACTIVE_INTERVAL_SECONDS=1800
-QUIETLEAF_ENABLE_NOVELPING=1
+QUIETLEAF_ENABLE_NOVELPING=0
 QUIETLEAF_NOVELPING_ACCESS_AUTHORIZED=0
-QUIETLEAF_NOVELPING_IMAGE_HOSTS=images.novelping.com
 ```
 
-Set `QUIETLEAF_NOVELPING_ACCESS_AUTHORIZED=1` only when the source owner has authorized the automated book and chapter access described in the README.
+Change `QUIETLEAF_ENABLE_NOVELPING` to `1` only when you intentionally want the source enabled. Set `QUIETLEAF_NOVELPING_ACCESS_AUTHORIZED=1` only when authorization covers automated access to the book, full chapter-list, and chapter pages. Search remains subject to the source's public robots policy.
 
-For host-level persistent paths, add a Compose override outside the release directory:
+For storage outside the release directory, use absolute paths:
 
-```yaml
-services:
-  content-api:
-    init: true
-    volumes:
-      - /srv/quietleaf/catalog:/app/catalog:ro
-      - /srv/quietleaf/archive:/app/archive:rw
+```dotenv
+QUIETLEAF_CATALOG_DIR=/srv/quietleaf/catalog
+QUIETLEAF_ARCHIVE_DIR=/srv/quietleaf/archive
 ```
 
-## 2. Build and start
+The AMP instance user needs read access to the catalog and read/write access to the archive. Back up the entire archive directory, not only `archive.sqlite3`, because SQLite may have active WAL files.
 
-From `/opt/quietleaf/service`:
+## 4. Configure AMP Generic
+
+Use these process settings in the Generic instance:
+
+| Setting | Value |
+|---|---|
+| Working directory | QuietLeaf service directory |
+| Executable | `/bin/sh` |
+| Arguments | `amp-start.sh 8765` |
+| Shutdown | Normal SIGTERM/SIGINT process stop |
+| Restart on failure | Enabled |
+| Sleep when empty | Disabled |
+
+Replace `8765` with the port allocated to this instance. The first argument overrides `PORT` in `.env`, so the same release can be used in different AMP instances.
+
+Do not append `&`, use `nohup`, enable Uvicorn `--reload`, or start multiple workers. `amp-start.sh` uses `exec`, leaving Uvicorn as AMP's foreground process.
+
+Start the instance, then validate it from the host:
 
 ```bash
-docker compose \
-  --env-file /etc/quietleaf/quietleaf.env \
-  -f compose.yaml -f /etc/quietleaf/compose.host.yaml \
-  config --quiet
-
-docker compose \
-  --env-file /etc/quietleaf/quietleaf.env \
-  -f compose.yaml -f /etc/quietleaf/compose.host.yaml \
-  up -d --build
+curl -fsS http://127.0.0.1:8765/healthz
+curl -fsS -H 'Authorization: Bearer <token>' http://127.0.0.1:8765/v1/health
 ```
 
-The first build downloads Chromium and its Linux dependencies. Keep one API container and one Uvicorn worker because the archive scheduler uses a single SQLite database.
+The first endpoint is a minimal probe for AMP. Detailed status and all archive data remain Bearer-protected.
 
-Validate locally without placing the token in a URL:
+## 5. Connect Cloudflare Tunnel
 
-```bash
-curl -fsS \
-  -H 'Authorization: Bearer <token>' \
-  http://127.0.0.1:8765/v1/health
+In Cloudflare, add a published application route:
+
+| Field | Value |
+|---|---|
+| Hostname | `books.example.com` |
+| Service | `http://127.0.0.1:8765` |
+
+Use the actual loopback port assigned to the AMP instance. Keep the QuietLeaf Bearer token enabled and do not add an interactive Cloudflare Access login in front of this hostname: the Android client sends the QuietLeaf `Authorization` header and cannot complete a browser login redirect.
+
+Recommended controls:
+
+- Keep the origin port closed to the public network.
+- Add Cloudflare rate limits and a cache-bypass rule for the API hostname.
+- Treat the tunnel token and QuietLeaf API token as secrets.
+- Monitor `/healthz`; it reveals no source or archive information.
+
+## 6. Use the web console
+
+Open:
+
+```text
+https://books.example.com/admin
 ```
 
-The response should identify `quietleaf-content-api`, report API version 1, and list the expected sources.
+Enter the same API token used by Android. The token remains only in that browser tab's memory. The console shows runtime information, archived novels, recent jobs, and automatic follow status. It can stop automatic checks and permanently delete completed or failed archives.
 
-## 3. Create the Cloudflare Tunnel
+Deletion removes the saved chapters, archived cover, job history, and follow state. A novel with a queued, running, or paused archive job cannot be deleted until that job finishes or is canceled through the API.
 
-1. In Cloudflare, create a named tunnel under **Networking > Tunnels**.
-2. Install the dashboard-provided connector command as a native system service on the AMP host. Treat the tunnel token as a secret.
-3. Add a published application route:
-   - Hostname: `books.example.com`
-   - Service: `http://127.0.0.1:8765`
-4. Confirm Cloudflare creates the proxied tunnel DNS record.
-5. Enable tunnel health notifications and add a cache-bypass rule for this API hostname.
+## 7. Connect Android
 
-No WebSocket option is needed; QuietLeaf uses ordinary HTTP requests and polling.
-
-## 4. Authentication policy
-
-Keep QuietLeaf's long random Bearer token enabled. The current Android client is not compatible with a normal Cloudflare Access login or service-token policy because it sends only the origin `Authorization: Bearer ...` header and rejects redirects.
-
-For this version:
-
-- Do not put an interactive Cloudflare Access challenge in front of the API hostname.
-- Use the Cloudflare Tunnel, the QuietLeaf API token, WAF/rate limits, and the loopback-only origin binding.
-- Do not expose port 8765 on the public host firewall.
-
-Cloudflare Access can be added later after Android supports the separate `CF-Access-Client-Id` and `CF-Access-Client-Secret` headers for API and cover requests.
-
-## 5. External validation
-
-From a machine outside the AMP network:
-
-```bash
-curl --max-redirs 0 -sS -o /dev/null -w '%{http_code}\n' \
-  https://books.example.com/v1/health
-```
-
-Expect `401`. Then repeat with the Bearer token and expect `200`. A `302` or HTML login page means a Cloudflare Access policy is intercepting the app.
-
-In Android, connect **Settings > Manage sources > Self-hosted content service** to exactly:
+In QuietLeaf, open **Settings > Manage sources > Self-hosted content service** and enter:
 
 ```text
 https://books.example.com
 ```
 
-Validate search, cover images, book details, chapter text, archive jobs, and an archived cover over both Wi-Fi and cellular data.
+Use the same API token from `.env`. Validate search, book details, the full chapter list, chapter text, archive jobs, and covers over both Wi-Fi and cellular data.
 
-## 6. Backups, updates, and rollback
+## Updates and backups
 
-- Back up `/srv/quietleaf/archive`, `/srv/quietleaf/catalog`, and deployment configuration off-host.
-- For a simple consistent SQLite backup, stop the API container, copy the full archive directory, and restart it.
-- Stage each update in a new release directory and use an immutable image tag.
-- Run the Python and Android tests before deployment.
-- Do not run old and new containers concurrently against the same archive.
-- Keep the previous image and pre-update archive backup for rollback.
-- Preserve the hostname and loopback port so Android and Cloudflare need no changes during rollback.
+1. Stop the AMP instance.
+2. Back up `archive/`, `catalog/`, `.env`, and any external configuration.
+3. Replace or pull the application files without deleting `.env` or `archive/`.
+4. Re-run `sh install-amp.sh` to refresh the virtual environment.
+5. Start the instance and check `/healthz`, `/v1/health`, and `/admin`.
 
-## Information needed before deployment
+Do not run old and new instances concurrently against the same archive directory. For rollback, stop the instance before restoring both the release and its matching archive backup.
 
-- AMP host operating system and architecture.
-- SSH/root access and whether Docker Compose v2 is already installed.
-- The chosen domain and subdomain.
-- Whether Cloudflare already has a tunnel connector on the host.
-- Desired archive size and backup destination.
-- Whether authorized NovelPing browser mode should remain enabled.
+## Troubleshooting
+
+- **AMP stops immediately:** inspect the instance log. The start script rejects a missing token, missing virtual environment, or invalid port.
+- **Dashboard opens but login fails:** verify `QUIETLEAF_API_TOKEN` and ensure Cloudflare is not replacing the response with an Access login.
+- **NovelPing details fail:** confirm both NovelPing settings in `.env`, the authorization status, and outbound HTTPS access, then inspect the AMP log for the upstream response.
+- **Only a short NovelPing preview appears:** confirm this release is current and authorized mode is enabled; full lists use NovelPing's same-origin chapter-archive response.
+- **Automatic checks do not run:** disable AMP sleep and confirm the dashboard reports the archive worker as running.

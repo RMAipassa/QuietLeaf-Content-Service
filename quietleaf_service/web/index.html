@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>QuietLeaf Service Console</title>
+  <link rel="stylesheet" href="/admin/assets/admin.css">
+  <script src="/admin/assets/admin.js" defer></script>
+</head>
+<body>
+  <header class="masthead">
+    <a class="brand" href="/admin" aria-label="QuietLeaf service console">
+      <span class="leaf-mark">QL</span>
+      <span><strong>QuietLeaf</strong><small>service console</small></span>
+    </a>
+    <div class="connection">
+      <span id="connection-dot" class="status-dot"></span>
+      <span id="connection-label">Locked</span>
+      <button id="lock-button" class="text-button" type="button" hidden>Lock</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="login-panel" class="login-panel">
+      <div class="login-copy">
+        <p class="eyebrow">Private administration</p>
+        <h1>Your archive,<br>at a glance.</h1>
+        <p>Enter the same API token used by the QuietLeaf Android app. It stays in this tab's memory and is never saved by the dashboard.</p>
+      </div>
+      <form id="login-form" class="token-card" autocomplete="off">
+        <label for="token-input">Service API token</label>
+        <input id="token-input" name="token" type="password" autocomplete="off" spellcheck="false" required>
+        <button class="primary-button" type="submit">Open console</button>
+        <p id="login-error" class="form-error" role="alert"></p>
+      </form>
+    </section>
+
+    <section id="console" hidden>
+      <div class="console-heading">
+        <div>
+          <p class="eyebrow">Remote library operations</p>
+          <h1>Service overview</h1>
+          <p id="last-updated" class="muted">Waiting for service data.</p>
+        </div>
+        <button id="refresh-button" class="secondary-button" type="button">Refresh now</button>
+      </div>
+
+      <div id="notice" class="notice" role="status" hidden></div>
+
+      <section class="metric-grid" aria-label="Service summary">
+        <article class="metric"><span>Archive</span><strong id="metric-service">Checking</strong><small id="metric-version">Service status</small></article>
+        <article class="metric"><span>Saved novels</span><strong id="metric-books">0</strong><small>On this server</small></article>
+        <article class="metric"><span>Archive jobs</span><strong id="metric-jobs">0</strong><small id="metric-job-detail">No active work</small></article>
+        <article class="metric"><span>Following</span><strong id="metric-follows">0</strong><small>Automatic checks enabled</small></article>
+      </section>
+
+      <section class="panel service-panel">
+        <div>
+          <p class="eyebrow">Runtime</p>
+          <h2>Service details</h2>
+        </div>
+        <dl id="service-details" class="detail-list"></dl>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div><p class="eyebrow">Persistent archive</p><h2>Saved novels</h2></div>
+          <label class="search-field"><span>Filter</span><input id="book-filter" type="search" placeholder="Title, author, or source"></label>
+        </div>
+        <p id="book-result-note" class="muted"></p>
+        <div id="book-list" class="book-list"></div>
+      </section>
+
+      <div class="split-grid">
+        <section class="panel">
+          <div class="panel-heading"><div><p class="eyebrow">Background work</p><h2>Recent jobs</h2></div></div>
+          <div id="job-list" class="compact-list"></div>
+        </section>
+        <section class="panel">
+          <div class="panel-heading"><div><p class="eyebrow">Automatic updates</p><h2>Followed novels</h2></div></div>
+          <div id="follow-list" class="compact-list"></div>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <footer>QuietLeaf keeps this console local to your service. Use HTTPS whenever it leaves the host.</footer>
+</body>
+</html>

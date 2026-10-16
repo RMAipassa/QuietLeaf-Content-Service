@@ -1,4 +1,4 @@
-# QuietLeaf Content Service (v0.6)
+# QuietLeaf Content Service (v0.7)
 
 A small Python HTTPS-ready API **separate** from the Android reader. It supplies books through configured adapters while QuietLeaf stores progress and downloaded chapters locally. Running the service is optional: Gutenberg and imports work without it. When using the service, you need a reachable server; the app rejects plain HTTP.
 
@@ -23,6 +23,20 @@ curl -H 'Authorization: Bearer generate-a-long-random-token' \
 ```
 
 On Android, go to **Settings > Manage sources > Self-hosted content service** and enter its HTTPS URL and token. Find the new **My content service** tab in Discover. The sample chapters are safe test content; your own permitted catalog can replace them.
+
+Open `http://127.0.0.1:8765/admin` and enter the same token to use the private service console. It shows runtime status, saved novels, archive jobs, and automatic checks, and can stop checks or permanently delete archives.
+
+### CubeCoders AMP without Docker
+
+The service includes native Linux setup and foreground startup scripts for an AMP Generic instance:
+
+```bash
+cp amp.env.example .env
+sh install-amp.sh
+sh amp-start.sh 8765
+```
+
+Docker is not required. See [`DEPLOYMENT_AMP_CLOUDFLARE.md`](DEPLOYMENT_AMP_CLOUDFLARE.md) for the AMP process settings, persistent storage, Cloudflare Tunnel, and update steps.
 
 ### Docker Compose (alternative)
 
@@ -90,7 +104,7 @@ export QUIETLEAF_ENABLE_NOVELPING=1
 docker compose up --build -d
 ```
 
-If the source owner has explicitly authorized automated access to NovelPing book and chapter pages despite its public robots policy, enable the separate browser-rendering mode:
+If the source owner has explicitly authorized automated access to NovelPing book, full chapter-list, and chapter pages despite its public robots policy, enable the separate authorized-access mode:
 
 ```bash
 export QUIETLEAF_API_TOKEN='your-secret-token'
@@ -99,15 +113,24 @@ export QUIETLEAF_NOVELPING_ACCESS_AUTHORIZED=1
 docker compose up --build -d
 ```
 
-This mode uses headless Chromium only for `/book/` pages. It remains disabled by default, keeps the configured request interval and same-origin restrictions, blocks redirects and off-origin browser requests, and limits rendered HTML to 2 MiB. Search and browse pages continue through the robots-aware HTTP path. Enable it only while your authorization covers automated page access and copying or archiving the requested content.
+This mode makes bounded HTTPS requests to `/book/` pages and to the same-origin `/ajax/chapter-archive` response used by NovelPing's Chapter List tab. It does not execute site JavaScript. It remains disabled by default, keeps the configured request interval and same-origin restrictions, blocks redirects, and limits HTML responses to 2 MiB. Search and browse pages continue through the robots-aware path. Enable it only while your authorization covers automated page and chapter-list access and copying or archiving the requested content.
 
 The Android app sees the `novelping` provider through its existing **My content service** discovery tab, when that content service has been connected via Settings. Chapters that are returned through the API can use the existing local download queue.
 
-**Verification status:** Search, metadata, current cover markup, chapter lists, and chapter text have been validated against the live site as well as fixture tests. The integration remains experimental because a site layout change can still break extraction; the adapter reports errors instead of inventing chapters. The opt-in switch does not mean the integration is production-ready.
+**Verification status:** Search, metadata, current cover markup, full chapter archives, and chapter text have been validated against the live site as well as fixture tests. NovelPing's book page exposes only a short preview; QuietLeaf now reads the complete Chapter List response in authorized mode. The integration remains experimental because a site layout change can still break extraction; the adapter reports errors instead of inventing chapters. The opt-in switch does not mean the integration is production-ready.
 
 If the website uses a different search route, set `QUIETLEAF_NOVELPING_SEARCH_PATH` to a relative path containing `{query}`. For example, `'/search?q={query}'`. If NovelPing changes to a verifiably authentic new domain, change `QUIETLEAF_NOVELPING_BASE_URL` and restart the service. The source IDs and chapter identifiers remain independent of its domain.
 
 NovelBin is not preconfigured. It can use the generic adapter when you have a workable, permissible source and stable HTML. An adapter configuration does not grant rights to a novel.
+
+## New in v0.7: AMP hosting, service console, and complete chapter lists
+
+- `install-amp.sh` and `amp-start.sh` run the service as a foreground process in an AMP Generic instance without Docker.
+- `/admin` provides a responsive management console for service status, saved novels, archive jobs, follow state, cleanup, and stopping automatic checks.
+- `/healthz` provides a minimal unauthenticated process probe for AMP and Cloudflare monitoring. It exposes no archive or source details.
+- NovelPing authorized mode reads the full chapter archive instead of treating the short book-page preview as the complete list.
+
+The admin shell contains no private data. Its token is kept only in browser memory, while every data and management request continues to require the configured Bearer token.
 
 ## New in v0.6 — covers saved with novel archives
 
@@ -175,6 +198,8 @@ Use a private network, an API token, and HTTPS when exposing the server beyond l
 
 | Endpoint | Result |
 |---|---|
+| `GET /healthz` | Minimal process probe without private details |
+| `GET /admin` | Browser-based service console shell |
 | `GET /v1/health` | Versioned service identity, source list and archive status |
 | `GET /v1/search?q=...&genre=...` | Search across all registered sources |
 | `GET /v1/recent` | Recently updated books where known |
@@ -193,7 +218,7 @@ Use a private network, an API token, and HTTPS when exposing the server beyond l
 | `GET /v1/archive/books/{source}/{id}` | Archived-chapter count and storage size |
 | `DELETE /v1/archive/books/{source}/{id}` | Permanently delete an archived book |
 
-Every endpoint requires `Authorization: Bearer <token>` when `QUIETLEAF_API_TOKEN` is configured. No accounts, ads or commercial services are needed by this backend; the private archive uses local SQLite. Access tokens are stored in the Android app's private preferences; they are not hardware-backed encrypted. Use a low-privilege token dedicated to this service.
+Every `/v1` endpoint requires `Authorization: Bearer <token>` when `QUIETLEAF_API_TOKEN` is configured. The public `/admin` shell contains no service data and `/healthz` returns only process status. No accounts, ads or commercial services are needed by this backend; the private archive uses local SQLite. Access tokens are stored in the Android app's private preferences; they are not hardware-backed encrypted. Use a low-privilege token dedicated to this service.
 
 ## Tests
 
@@ -201,7 +226,7 @@ Every endpoint requires `Authorization: Bearer <token>` when `QUIETLEAF_API_TOKE
 python -m pytest -q
 ```
 
-Automated tests cover persistent archiving, source-offline fallback, restart and retry recovery, deduplication, storage limits, source removal, simulated NovelPing archiving, per-source failure isolation, API authentication, text access, metadata-only chapters, book/chapter ordering, a fixture-driven HTML extraction adapter, experimental NovelPing HTML parsing, cross-origin link blocking, robots restrictions, path traversal and authorization requirement.
+Automated tests cover persistent archiving, source-offline fallback, restart and retry recovery, deduplication, storage limits, source removal, simulated NovelPing archiving, complete NovelPing chapter archives, dashboard security, per-source failure isolation, API authentication, text access, metadata-only chapters, book/chapter ordering, a fixture-driven HTML extraction adapter, cross-origin link blocking, robots restrictions, path traversal and authorization requirement.
 
 ## Current limitations
 

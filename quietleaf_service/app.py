@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from fastapi.responses import PlainTextResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 
+from . import __version__
 from .adapters import CatalogSource, HtmlSource, Source, SourceError, require_id
 from .archive import ArchiveStore, ArchiveWorker
 from .novelping import NovelPingSource
@@ -40,17 +43,52 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
         if worker:
             worker.stop()
 
-    app = FastAPI(title="QuietLeaf Content API", version="1.3.0", docs_url=None,
+    app = FastAPI(title="QuietLeaf Content API", version=__version__, docs_url=None,
                   redoc_url=None, lifespan=lifespan)
     app.state.archive_worker = worker
     app.state.archive_store = archive
+    web_root = Path(__file__).with_name("web")
+    app.mount("/admin/assets", StaticFiles(directory=web_root), name="admin-assets")
+    public_paths = {
+        "/", "/admin", "/admin/", "/healthz",
+        "/admin/assets/admin.css", "/admin/assets/admin.js",
+    }
 
     @app.middleware("http")
     async def bearer_auth(request, call_next):
-        from starlette.responses import JSONResponse
-        if token and request.headers.get("authorization") != "Bearer " + token:
-            return JSONResponse({"detail": "Invalid API token"}, status_code=401)
-        return await call_next(request)
+        public = request.method in {"GET", "HEAD"} and request.url.path in public_paths
+        if token and not public:
+            scheme, separator, supplied = request.headers.get("authorization", "").partition(" ")
+            valid = (separator and scheme.lower() == "bearer" and supplied and
+                     secrets.compare_digest(supplied.encode("utf-8"), token.encode("utf-8")))
+            if not valid:
+                return JSONResponse({"detail": "Invalid API token"}, status_code=401,
+                                    headers={"WWW-Authenticate": "Bearer"})
+        response = await call_next(request)
+        if request.url.path in public_paths:
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'none'; script-src 'self'; style-src 'self'; "
+                "connect-src 'self'; img-src 'self' blob:; base-uri 'none'; "
+                "frame-ancestors 'none'; form-action 'none'"
+            )
+            response.headers["Referrer-Policy"] = "no-referrer"
+            response.headers["X-Content-Type-Options"] = "nosniff"
+            response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        return response
+
+    @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
+    def root():
+        return RedirectResponse("/admin", status_code=307)
+
+    @app.api_route("/admin", methods=["GET", "HEAD"], include_in_schema=False)
+    @app.api_route("/admin/", methods=["GET", "HEAD"], include_in_schema=False)
+    def admin():
+        return FileResponse(web_root / "index.html", media_type="text/html")
+
+    @app.api_route("/healthz", methods=["GET", "HEAD"], include_in_schema=False)
+    def health_probe():
+        return {"status": "ok"}
 
     def source_for(source_id: str) -> Source:
         try:
@@ -99,7 +137,9 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
     @app.get("/v1/health")
     def health():
         return {"service": "quietleaf-content-api", "version": 1,
+                "releaseVersion": __version__,
                 "archiveEnabled": archive is not None,
+                "archiveWorkerRunning": bool(worker and worker.thread and worker.thread.is_alive()),
                 "followIntervalSeconds": archive.poll_seconds if archive else None,
                 "activeIntervalSeconds": archive.active_poll_seconds if archive else None,
                 "sources": [{"id": s.id, "name": s.name} for s in sources]}
@@ -198,12 +238,13 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
     @app.get("/v1/archive/books")
     def archived_books(q: str = ""):
         storage = writable_archive()
-        return {"items": storage.list_books(q)}
+        items = storage.list_books(q)
+        return {"items": items, "total": storage.book_count() if not q.strip() else len(items)}
 
     @app.get("/v1/archive/books/{source_id}/{book_id}")
     def archived_book(source_id: str, book_id: str):
         storage = writable_archive()
-        item = storage.stats(source_id, book_id)
+        item = apply(storage.stats, source_id, book_id)
         if not item:
             raise HTTPException(status_code=404, detail="Book not archived")
         item["follow"] = storage.follow_status(source_id, book_id)
@@ -245,11 +286,11 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
 
     @app.delete("/v1/archive/follows/{source_id}/{book_id}")
     def stop_following(source_id: str, book_id: str):
-        return {"updated": writable_archive().unfollow(source_id, book_id)}
+        return {"updated": apply(writable_archive().unfollow, source_id, book_id)}
 
     @app.post("/v1/archive/activity/{source_id}/{book_id}")
     def reading_activity(source_id: str, book_id: str):
-        return {"recorded": writable_archive().record_activity(source_id, book_id)}
+        return {"recorded": apply(writable_archive().record_activity, source_id, book_id)}
 
     @app.get("/v1/archive/jobs")
     def archive_jobs():
