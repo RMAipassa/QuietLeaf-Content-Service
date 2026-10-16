@@ -1,0 +1,26 @@
+services:
+  content-api:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8765:8765"
+    environment:
+      QUIETLEAF_API_TOKEN: "${QUIETLEAF_API_TOKEN:?Set QUIETLEAF_API_TOKEN first}"
+      QUIETLEAF_CATALOG_DIR: /app/catalog
+      QUIETLEAF_ARCHIVE_DIR: /app/archive
+      QUIETLEAF_ARCHIVE_MAX_BYTES: "${QUIETLEAF_ARCHIVE_MAX_BYTES:-2147483648}"
+      QUIETLEAF_FOLLOW_INTERVAL_SECONDS: "${QUIETLEAF_FOLLOW_INTERVAL_SECONDS:-3600}"
+      QUIETLEAF_ACTIVE_INTERVAL_SECONDS: "${QUIETLEAF_ACTIVE_INTERVAL_SECONDS:-1800}"
+      QUIETLEAF_ENABLE_NOVELPING: "${QUIETLEAF_ENABLE_NOVELPING:-0}"
+      QUIETLEAF_NOVELPING_ACCESS_AUTHORIZED: "${QUIETLEAF_NOVELPING_ACCESS_AUTHORIZED:-0}"
+      QUIETLEAF_NOVELPING_BASE_URL: "${QUIETLEAF_NOVELPING_BASE_URL:-https://novelping.com}"
+      QUIETLEAF_NOVELPING_SEARCH_PATH: "${QUIETLEAF_NOVELPING_SEARCH_PATH:-/search?keyword={query}}"
+      QUIETLEAF_NOVELPING_IMAGE_HOSTS: "${QUIETLEAF_NOVELPING_IMAGE_HOSTS:-}"
+    volumes:
+      - ./catalog:/app/catalog:ro
+      - ./archive:/app/archive:rw
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp

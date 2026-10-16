@@ -1,0 +1,18 @@
+{
+  "name": "My permitted collection",
+  "books": [
+    {
+      "id": "lighthouse-demo",
+      "title": "At the Lighthouse",
+      "author": "QuietLeaf demo",
+      "description": "Original sample fiction included to test offline chapters.",
+      "genre": "Adventure",
+      "updated": "2026-10-16",
+      "chapters": [
+        {"id": "chapter-1", "title": "The Signal", "file": "books/lighthouse-1.txt", "copyPermitted": true},
+        {"id": "chapter-2", "title": "The Tide", "file": "books/lighthouse-2.txt", "copyPermitted": true},
+        {"id": "chapter-3", "title": "An upcoming chapter", "copyPermitted": false}
+      ]
+    }
+  ]
+}

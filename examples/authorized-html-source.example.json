@@ -1,0 +1,28 @@
+[
+  {
+    "id": "my_authorized_site",
+    "name": "My authorized fiction website",
+    "baseUrl": "https://fiction.example.org",
+    "accessAuthorized": false,
+    "minIntervalSeconds": 2,
+    "paths": {
+      "search": "/search?q={query}",
+      "recent": "/recent",
+      "book": "/books/{id}",
+      "chapter": "/books/{id}/{chapter}"
+    },
+    "selectors": {
+      "result": ".book-result",
+      "resultLink": "a.title",
+      "resultAuthor": ".author",
+      "resultCover": ".cover img",
+      "title": "h1",
+      "cover": ".book-cover img",
+      "author": ".byline",
+      "description": ".summary",
+      "genre": ".genre",
+      "chapterLink": ".chapter-list a",
+      "chapterBody": "article.chapter-content"
+    }
+  }
+]
