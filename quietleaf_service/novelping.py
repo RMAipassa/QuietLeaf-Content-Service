@@ -165,6 +165,11 @@ class NovelPingSource(HtmlSource):
             self._home_cached_at = time.monotonic()
             return copy.deepcopy(feed)
 
+    def clear_home_cache(self) -> None:
+        with self._home_lock:
+            self._home_cache = None
+            self._home_cached_at = float("-inf")
+
     @staticmethod
     def _field(page: BeautifulSoup, label: str) -> str:
         pattern = re.compile(r"^" + re.escape(label) + r"\s*:\s*", re.I)

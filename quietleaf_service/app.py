@@ -204,6 +204,16 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
         result["errors"] = errors
         return result
 
+    @app.delete("/v1/home/cache")
+    def clear_home_cache():
+        cleared = 0
+        for src in sources:
+            clear = getattr(src, "clear_home_cache", None)
+            if callable(clear):
+                apply(clear)
+                cleared += 1
+        return {"clearedSources": cleared}
+
     @app.get("/v1/recent")
     def recent():
         return combined(sources, "recent")

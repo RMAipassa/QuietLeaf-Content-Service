@@ -114,6 +114,7 @@ input:focus { border-color: var(--leaf); box-shadow: 0 0 0 3px rgba(185, 221, 11
 .console-heading, .panel-heading { display: flex; justify-content: space-between; align-items: end; gap: 24px; }
 .console-heading { margin-bottom: 30px; }
 .console-heading h1 { font-size: clamp(2.7rem, 6vw, 4.8rem); margin-bottom: 10px; }
+.heading-actions { display: flex; gap: 10px; }
 .metric-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 18px; }
 .metric { padding: 20px; border-radius: 4px 15px 15px 15px; }
 .metric span, .metric small { display: block; color: var(--muted); }
@@ -169,4 +170,5 @@ footer { padding: 24px 20px 40px; border-top: 1px solid var(--line); color: var(
   .book-actions { align-items: stretch; }
   .search-field { width: 100%; }
   .connection #connection-label { display: none; }
+  .heading-actions { flex-direction: column; }
 }

@@ -9,6 +9,7 @@
   const loginError = byId("login-error");
   const lockButton = byId("lock-button");
   const refreshButton = byId("refresh-button");
+  const homeCacheButton = byId("home-cache-button");
   const bookFilter = byId("book-filter");
   const notice = byId("notice");
 
@@ -280,6 +281,22 @@
     }
   }
 
+  async function refreshHomeShelves() {
+    homeCacheButton.disabled = true;
+    showNotice("Refreshing home shelves from their sources...");
+    try {
+      const cleared = await api("/v1/home/cache", { method: "DELETE" });
+      const feed = await api("/v1/home");
+      const total = ["popular", "completed", "fresh", "new", "hot"]
+        .reduce((count, category) => count + (feed[category]?.length || 0), 0);
+      showNotice(`Home cache cleared for ${cleared.clearedSources} source(s); ${total} shelf entries loaded.`);
+    } catch (error) {
+      showNotice(`Could not refresh home shelves: ${error.message}`);
+    } finally {
+      homeCacheButton.disabled = false;
+    }
+  }
+
   loginForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     loginError.textContent = "";
@@ -300,5 +317,6 @@
 
   lockButton.addEventListener("click", () => lock());
   refreshButton.addEventListener("click", refresh);
+  homeCacheButton.addEventListener("click", refreshHomeShelves);
   bookFilter.addEventListener("input", renderBooks);
 })();

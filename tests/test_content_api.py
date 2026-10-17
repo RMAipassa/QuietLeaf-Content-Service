@@ -168,6 +168,27 @@ def test_home_feed_is_authenticated_and_handles_optional_or_failed_sources():
     assert "private upstream failure details" not in response.text
 
 
+def test_home_cache_clear_is_authenticated_and_calls_supported_sources():
+    class CachedHomeSource:
+        id = "cached"
+        name = "Cached"
+
+        def __init__(self):
+            self.clear_count = 0
+
+        def clear_home_cache(self):
+            self.clear_count += 1
+
+    source = CachedHomeSource()
+    with TestClient(make_app([source], "local-dev-token")) as home_client:
+        assert home_client.delete("/v1/home/cache").status_code == 401
+        response = home_client.delete("/v1/home/cache", headers=auth())
+
+    assert response.status_code == 200
+    assert response.json() == {"clearedSources": 1}
+    assert source.clear_count == 1
+
+
 def test_build_from_env_loads_working_directory_dotenv(tmp_path, monkeypatch):
     catalog = tmp_path / "catalog"
     catalog.mkdir()

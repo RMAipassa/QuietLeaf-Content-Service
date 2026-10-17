@@ -112,9 +112,13 @@ def test_novelping_home_feed_paths_bounds_deduplication_and_cache():
     second = adapter.home_feed()
     assert len(requested) == 5
     assert second["popular"][0]["title"] == "Popular 0"
+    adapter.clear_home_cache()
+    third = adapter.home_feed()
+    assert len(requested) == 10
+    assert third["popular"][0]["title"] == "Popular 0"
     with TestClient(make_app([adapter], "local-token")) as api:
         result = api.get("/v1/home", headers={"Authorization": "Bearer local-token"}).json()
-    assert len(requested) == 5
+    assert len(requested) == 10
     assert all(book["source"] == "novelping" for category in adapter.HOME_PATHS for book in result[category])
 
 
