@@ -287,7 +287,7 @@ def test_novelping_extracts_live_card_and_detail_metadata():
     adapter = source(metadata)
     found = adapter.search("Test")[0]
     assert found["author"] == "Demo Writer"
-    assert found["coverUrl"] == "https://images.novelping.com/novel_200_89/test-novel.jpg"
+    assert found["coverUrl"] == "https://images.novelping.com/novel/test-novel.jpg"
     details = adapter.details(BOOK)
     assert details["author"] == "Demo Writer"
     assert details["genre"] == "Fantasy, Action"

@@ -47,7 +47,7 @@ def test_only_exact_admin_resources_bypass_bearer_auth(tmp_path):
 
         authorized = client.get("/v1/health", headers={"Authorization": f"Bearer {TOKEN}"})
         assert authorized.status_code == 200
-        assert authorized.json()["releaseVersion"] == "0.8.0"
+        assert authorized.json()["releaseVersion"] == "0.8.1"
         assert authorized.json()["archiveWorkerRunning"] is True
 
 

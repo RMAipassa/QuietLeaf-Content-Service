@@ -124,7 +124,12 @@ class NovelPingSource(HtmlSource):
                 if not isinstance(candidate, str) or not candidate.strip():
                     continue
                 try:
-                    return self.image_url(candidate)
+                    cover_url = self.image_url(candidate)
+                    target = urlsplit(cover_url)
+                    if target.hostname == "images.novelping.com":
+                        full_size_path = re.sub(r"^/novel_\d+_\d+/", "/novel/", target.path)
+                        cover_url = target._replace(path=full_size_path).geturl()
+                    return cover_url
                 except SourceError:
                     continue
         return ""
