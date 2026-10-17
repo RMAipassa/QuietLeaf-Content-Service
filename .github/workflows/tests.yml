@@ -20,3 +20,29 @@ jobs:
         run: python -m pip install '.[test]'
       - name: Run tests
         run: python -m pytest -q
+
+  deploy:
+    name: Deploy to AMP
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-latest
+    permissions: {}
+    concurrency:
+      group: quietleaf-service-production
+      cancel-in-progress: false
+    steps:
+      - name: Trigger AMP update
+        env:
+          AMP_WEBHOOK_TOKEN: ${{ secrets.AMP_WEBHOOK_TOKEN }}
+          AMP_WEBHOOK_URL: ${{ secrets.AMP_WEBHOOK_URL }}
+        run: |
+          body=$(jq -cn --arg token "$AMP_WEBHOOK_TOKEN" \
+            '{payload:"deploy-main",data:"",SESSIONID:$token}')
+          curl --fail-with-body --silent --show-error \
+            --retry 3 --retry-all-errors \
+            --header "Accept: application/json" \
+            --header "Content-Type: application/json" \
+            --header "Authorization: Bearer $AMP_WEBHOOK_TOKEN" \
+            --header "Authorize: Bearer $AMP_WEBHOOK_TOKEN" \
+            --data "$body" \
+            "$AMP_WEBHOOK_URL"
