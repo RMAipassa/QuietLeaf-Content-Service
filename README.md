@@ -26,17 +26,21 @@ On Android, go to **Settings > Manage sources > Self-hosted content service** an
 
 Open `http://127.0.0.1:8765/admin` and enter the same token to use the private service console. It shows runtime status, saved novels, archive jobs, and automatic checks, and can stop checks or permanently delete archives.
 
-### CubeCoders AMP without Docker
+### CubeCoders AMP Python App Runner
 
-The service includes native Linux setup and foreground startup scripts for an AMP Generic instance:
+Create a native **Python App Runner** instance; Docker and a Generic instance are not required. The essential runner settings are:
 
-```bash
-cp amp.env.example .env
-sh install-amp.sh
-sh amp-start.sh 8765
+```text
+App Download Type: Git repo
+App Download Source: https://github.com/RMAipassa/QuietLeaf-Content-Service.git
+Run App Setup Command: enabled
+App Setup Command: python -m pip install -e .
+App Run Mode: Python module
+App Module Name: uvicorn
+App Command Line Arguments: quietleaf_service.app:app --host 127.0.0.1 --port {{$ServerPort}} --workers 1 --proxy-headers --forwarded-allow-ips 127.0.0.1
 ```
 
-Docker is not required. See [`DEPLOYMENT_AMP_CLOUDFLARE.md`](DEPLOYMENT_AMP_CLOUDFLARE.md) for the AMP process settings, persistent storage, Cloudflare Tunnel, and update steps.
+Create `.env` next to `pyproject.toml` from `amp.env.example`; QuietLeaf loads it directly from the runner's working directory. See [`DEPLOYMENT_AMP_CLOUDFLARE.md`](DEPLOYMENT_AMP_CLOUDFLARE.md) for all AMP fields, private repository authentication, Cloudflare Tunnel configuration, updates, backups, and security guidance. The shell helpers remain available for a manual Linux deployment outside Python App Runner.
 
 ### Docker Compose (alternative)
 
@@ -125,7 +129,7 @@ NovelBin is not preconfigured. It can use the generic adapter when you have a wo
 
 ## New in v0.7: AMP hosting, service console, and complete chapter lists
 
-- `install-amp.sh` and `amp-start.sh` run the service as a foreground process in an AMP Generic instance without Docker.
+- CubeCoders AMP's native Python App Runner can install and run the service directly without Docker; `install-amp.sh` and `amp-start.sh` remain available for manual Linux deployments.
 - `/admin` provides a responsive management console for service status, saved novels, archive jobs, follow state, cleanup, and stopping automatic checks.
 - `/healthz` provides a minimal unauthenticated process probe for AMP and Cloudflare monitoring. It exposes no archive or source details.
 - NovelPing authorized mode reads the full chapter archive instead of treating the short book-page preview as the complete list.

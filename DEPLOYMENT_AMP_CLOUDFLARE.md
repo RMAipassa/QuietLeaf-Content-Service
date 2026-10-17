@@ -1,157 +1,201 @@
-# AMP Generic Instance and Cloudflare Tunnel Deployment
+# AMP Python App Runner and Cloudflare Tunnel
 
-QuietLeaf can run directly inside a CubeCoders AMP Generic instance. Docker is not required.
+This deployment runs QuietLeaf natively in CubeCoders AMP's **Python App Runner**. It does not require Docker or a Generic instance.
 
-```text
-Android or browser -> https://books.example.com -> Cloudflare Tunnel
-                   -> 127.0.0.1:8765 -> AMP Generic instance -> QuietLeaf/Uvicorn
-```
+## 1. Prerequisites
 
-The process stays in the foreground so AMP can monitor, stop, and restart it. Run exactly one Uvicorn worker because the archive scheduler and SQLite store are designed for one service process.
+- AMP 2.5.0.8 or newer with the Python App Runner template.
+- Python 3.11 or newer and `venv` installed for all users on the AMP host.
+- Git and outbound HTTPS access if AMP will clone the repository.
+- `cloudflared` on the AMP host for public HTTPS access.
+- A private DNS hostname, such as `quietleaf.example.com`.
 
-## Prerequisites
+Keep this service single-instance and single-worker. Archive state is stored locally and is not designed for multiple concurrent processes.
 
-- A Linux AMP host with a Generic instance.
-- Python 3.11 or newer with the `venv` module.
-- Outbound HTTPS and DNS access.
-- A Cloudflare Tunnel connector on the same host, if the service must be reachable remotely.
-- Explicit permission before enabling authorized NovelPing access or archiving content.
+## 2. Create the instance
 
-The service binds to loopback by default. Do not open its port in the public firewall.
+In AMP's **Create Instance** page:
 
-## 1. Put the release in the AMP instance
+1. Select **Python App Runner** as the application.
+2. Leave Docker/containerization disabled so the instance runs natively.
+3. Assign the application port you want QuietLeaf to use. `7777` is the template default.
+4. Create and start the instance once so AMP initializes its directories, then stop it before configuration.
 
-Upload or clone this repository into a persistent directory owned by the AMP instance user. The directory must contain `pyproject.toml`, `amp-start.sh`, `catalog/`, and `quietleaf_service/`.
+If AMP offers sleep settings for the instance, disable them. QuietLeaf must keep running to process archive jobs and automatic checks.
 
-Do not place the release in a temporary update directory. The default SQLite archive is stored under `archive/` inside this directory and must survive restarts and updates.
+## 3. Configure Python App Runner
 
-## 2. Install the Python environment
+Open the instance's **Configuration** page and set these fields:
 
-From the service directory, run:
+| AMP field | Value |
+| --- | --- |
+| App Download Type | `Git repo` |
+| App Download Source | `https://github.com/RMAipassa/QuietLeaf-Content-Service.git` |
+| Git Repo Branch | `main` |
+| Git Repo Username | `RMAipassa` |
+| Git Repo Password/Token | A fine-grained GitHub token with read-only **Contents** access to this repository |
+| Python Version | `3.12` or another installed version from 3.11 onward |
+| Python Packages Install Method | `None` |
+| Run App Setup Command | Enabled |
+| App Setup Command | `python -m pip install -e .` |
+| App Run Mode | `Python module` |
+| App Module Name | `uvicorn` |
+| App Subdirectory | Leave empty |
+| App Command Line Arguments | `quietleaf_service.app:app --host 127.0.0.1 --port {{$ServerPort}} --workers 1 --proxy-headers --forwarded-allow-ips 127.0.0.1` |
 
-```bash
-sh install-amp.sh
-```
+The double braces in `{{$ServerPort}}` are required AMP syntax. Do not replace them with a fixed port in the command.
 
-Re-run the same install command after pulling a release that changes Python dependencies. Do not run it on every service start.
+Save the configuration, then use AMP's **Update** action. Python App Runner will clone the repository, create its `venv`, and run the setup command inside that environment.
 
-## 3. Configure the instance
+GitHub no longer accepts account passwords for Git HTTPS access. Use a dedicated fine-grained token, restrict it to this repository, grant only read-only Contents access, and enter it only in AMP's password field. The Python App Runner update process uses the credential in the Git remote URL, so access to the AMP instance and its files must be restricted.
 
-Copy `amp.env.example` to `.env` and generate a long random token:
+### Manual upload alternative
 
-```bash
-umask 077
-cp amp.env.example .env
-python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
-```
+To avoid storing a GitHub token in AMP:
 
-Put the generated value after `QUIETLEAF_API_TOKEN=` in `.env`. Protect that file so only the AMP instance user can read it:
+1. Set **App Download Type** to `None`.
+2. Upload the repository contents into the Python App Runner's root directory with AMP's File Manager.
+3. Keep the same Python, setup, module, and command-line settings.
+4. Run **Update** to create the virtual environment and install the app.
 
-```bash
-chmod 600 .env
-```
+Future releases must then be uploaded manually before running **Update** again.
 
-Important settings:
+## 4. Create `.env`
+
+Use AMP's File Manager to create `.env` in the app's root working directory, next to `pyproject.toml`. Start from `amp.env.example`:
 
 ```dotenv
-QUIETLEAF_API_TOKEN=<long-random-token>
-PORT=8765
-QUIETLEAF_ARCHIVE_MAX_BYTES=2147483648
+QUIETLEAF_API_TOKEN=replace-with-a-long-random-secret
 QUIETLEAF_ENABLE_NOVELPING=0
 QUIETLEAF_NOVELPING_ACCESS_AUTHORIZED=0
+QUIETLEAF_NOVELPING_DELAY_SECONDS=1.0
+QUIETLEAF_AUTO_ARCHIVE_MAX_CHAPTERS=0
 ```
 
-Change `QUIETLEAF_ENABLE_NOVELPING` to `1` only when you intentionally want the source enabled. Set `QUIETLEAF_NOVELPING_ACCESS_AUTHORIZED=1` only when authorization covers automated access to the book, full chapter-list, and chapter pages. Search remains subject to the source's public robots policy.
-
-For storage outside the release directory, use absolute paths:
-
-```dotenv
-QUIETLEAF_CATALOG_DIR=/srv/quietleaf/catalog
-QUIETLEAF_ARCHIVE_DIR=/srv/quietleaf/archive
-```
-
-The AMP instance user needs read access to the catalog and read/write access to the archive. Back up the entire archive directory, not only `archive.sqlite3`, because SQLite may have active WAL files.
-
-## 4. Configure AMP Generic
-
-Use these process settings in the Generic instance:
-
-| Setting | Value |
-|---|---|
-| Working directory | QuietLeaf service directory |
-| Executable | `/bin/sh` |
-| Arguments | `amp-start.sh 8765` |
-| Shutdown | Normal SIGTERM/SIGINT process stop |
-| Restart on failure | Enabled |
-| Sleep when empty | Disabled |
-
-Replace `8765` with the port allocated to this instance. The first argument overrides `PORT` in `.env`, so the same release can be used in different AMP instances.
-
-Do not append `&`, use `nohup`, enable Uvicorn `--reload`, or start multiple workers. `amp-start.sh` uses `exec`, leaving Uvicorn as AMP's foreground process.
-
-Start the instance, then validate it from the host:
+Generate the token outside AMP, for example:
 
 ```bash
-curl -fsS http://127.0.0.1:8765/healthz
-curl -fsS -H 'Authorization: Bearer <token>' http://127.0.0.1:8765/v1/health
+openssl rand -hex 32
 ```
 
-The first endpoint is a minimal probe for AMP. Detailed status and all archive data remain Bearer-protected.
+QuietLeaf loads this file directly from the Python App Runner working directory. Normal process environment variables take precedence over values in `.env`.
 
-## 5. Connect Cloudflare Tunnel
+Only enable NovelPing after confirming you are authorized to access and automate that source:
 
-In Cloudflare, add a published application route:
+```dotenv
+QUIETLEAF_ENABLE_NOVELPING=1
+QUIETLEAF_NOVELPING_ACCESS_AUTHORIZED=1
+```
 
-| Field | Value |
-|---|---|
-| Hostname | `books.example.com` |
-| Service | `http://127.0.0.1:8765` |
+Keep NovelPing's delay at `1.0` seconds or higher. Set `QUIETLEAF_AUTO_ARCHIVE_MAX_CHAPTERS` to a positive limit only if new follows should automatically start bounded archive jobs.
 
-Use the actual loopback port assigned to the AMP instance. Keep the QuietLeaf Bearer token enabled and do not add an interactive Cloudflare Access login in front of this hostname: the Android client sends the QuietLeaf `Authorization` header and cannot complete a browser login redirect.
+The default catalog and archive paths are inside the app root. Both `archive/` and `.env` are ignored by Git, so AMP Git updates do not overwrite them. Back up `archive/` because it contains generated books, job state, and follow state.
 
-Recommended controls:
+## 5. Start and verify
 
-- Keep the origin port closed to the public network.
-- Add Cloudflare rate limits and a cache-bypass rule for the API hostname.
-- Treat the tunnel token and QuietLeaf API token as secrets.
-- Monitor `/healthz`; it reveals no source or archive information.
+Start the instance in AMP and inspect the console. The effective process should be equivalent to:
 
-## 6. Use the web console
+```bash
+venv/bin/python3 -u -m uvicorn quietleaf_service.app:app \
+  --host 127.0.0.1 \
+  --port 7777 \
+  --workers 1 \
+  --proxy-headers \
+  --forwarded-allow-ips 127.0.0.1
+```
 
-Open:
+Verify locally on the AMP host:
+
+```bash
+curl http://127.0.0.1:7777/healthz
+curl -H "Authorization: Bearer YOUR_TOKEN" http://127.0.0.1:7777/v1/health
+```
+
+Expected responses include:
+
+```json
+{"status":"ok"}
+```
+
+and an authenticated service status from `/v1/health`.
+
+If startup fails with a missing package, run AMP's **Update** action again and confirm the setup command completed successfully. Do not add a second Uvicorn worker to work around startup issues.
+
+## 6. Configure Cloudflare Tunnel
+
+Keep Uvicorn bound to `127.0.0.1`; Cloudflare Tunnel provides the public HTTPS endpoint without opening the AMP application port to the internet.
+
+Install and authenticate `cloudflared` on the AMP host, create a tunnel, and route the hostname:
+
+```bash
+cloudflared tunnel login
+cloudflared tunnel create quietleaf
+cloudflared tunnel route dns quietleaf quietleaf.example.com
+```
+
+Create the Cloudflare configuration file, commonly `/etc/cloudflared/config.yml`:
+
+```yaml
+tunnel: YOUR_TUNNEL_UUID
+credentials-file: /etc/cloudflared/YOUR_TUNNEL_UUID.json
+
+ingress:
+  - hostname: quietleaf.example.com
+    service: http://127.0.0.1:7777
+  - service: http_status:404
+```
+
+Install and start the tunnel as a host service:
+
+```bash
+sudo cloudflared service install
+sudo systemctl enable --now cloudflared
+```
+
+If the AMP instance uses a port other than `7777`, use that port in the tunnel and local verification commands. Keep Cloudflare SSL/TLS mode at **Full (strict)**.
+
+Verify externally:
+
+```bash
+curl https://quietleaf.example.com/healthz
+curl -H "Authorization: Bearer YOUR_TOKEN" https://quietleaf.example.com/v1/health
+```
+
+## 7. Dashboard and Android
+
+Open the dashboard at:
 
 ```text
-https://books.example.com/admin
+https://quietleaf.example.com/admin
 ```
 
-Enter the same API token used by Android. The token remains only in that browser tab's memory. The console shows runtime information, archived novels, recent jobs, and automatic follow status. It can stop automatic checks and permanently delete completed or failed archives.
+Enter the same API token from `.env`. The browser stores it only in the current tab's session storage.
 
-Deletion removes the saved chapters, archived cover, job history, and follow state. A novel with a queued, running, or paused archive job cannot be deleted until that job finishes or is canceled through the API.
-
-## 7. Connect Android
-
-In QuietLeaf, open **Settings > Manage sources > Self-hosted content service** and enter:
+In the Android app, configure:
 
 ```text
-https://books.example.com
+Server URL: https://quietleaf.example.com
+API token:  the same QUIETLEAF_API_TOKEN value
 ```
 
-Use the same API token from `.env`. Validate search, book details, the full chapter list, chapter text, archive jobs, and covers over both Wi-Fi and cellular data.
+Use HTTPS for Android. Do not expose the Uvicorn port directly or send the Bearer token over plain HTTP.
 
-## Updates and backups
+## 8. Updates and operations
 
-1. Stop the AMP instance.
-2. Back up `archive/`, `catalog/`, `.env`, and any external configuration.
-3. Replace or pull the application files without deleting `.env` or `archive/`.
-4. Re-run `sh install-amp.sh` to refresh the virtual environment.
-5. Start the instance and check `/healthz`, `/v1/health`, and `/admin`.
+For a Git-backed instance:
 
-Do not run old and new instances concurrently against the same archive directory. For rollback, stop the instance before restoring both the release and its matching archive backup.
+1. Stop QuietLeaf in AMP.
+2. Back up `archive/`.
+3. Run AMP's **Update** action to pull `main`, recreate the virtual environment, and reinstall the package.
+4. Start the instance and repeat the local and external health checks.
 
-## Troubleshooting
+Operational rules:
 
-- **AMP stops immediately:** inspect the instance log. The start script rejects a missing token, missing virtual environment, or invalid port.
-- **Dashboard opens but login fails:** verify `QUIETLEAF_API_TOKEN` and ensure Cloudflare is not replacing the response with an Access login.
-- **NovelPing details fail:** confirm both NovelPing settings in `.env`, the authorization status, and outbound HTTPS access, then inspect the AMP log for the upstream response.
-- **Only a short NovelPing preview appears:** confirm this release is current and authorized mode is enabled; full lists use NovelPing's same-origin chapter-archive response.
-- **Automatic checks do not run:** disable AMP sleep and confirm the dashboard reports the archive worker as running.
+- Run exactly one QuietLeaf instance and one Uvicorn worker against an archive directory.
+- Keep `.env`, Git credentials, and archive backups private.
+- Rotate both the GitHub token and `QUIETLEAF_API_TOKEN` if either is exposed.
+- Delete completed jobs from the dashboard when their EPUB files are no longer needed.
+- Use the dashboard's stop action before restarting an active automatic archive check.
+- Review AMP, Uvicorn, and Cloudflare logs after updates or tunnel changes.
+
+The repository's `install-amp.sh` and `amp-start.sh` remain available for a manual Linux deployment, but Python App Runner should use its built-in virtual environment and module settings above.

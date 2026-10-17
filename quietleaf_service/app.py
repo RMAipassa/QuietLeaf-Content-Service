@@ -10,6 +10,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
+from dotenv import load_dotenv
 
 from . import __version__
 from .adapters import CatalogSource, HtmlSource, Source, SourceError, require_id
@@ -314,6 +315,7 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
 
 
 def build_from_env() -> FastAPI:
+    load_dotenv(Path.cwd() / ".env", override=False)
     root = Path(os.getenv("QUIETLEAF_CATALOG_DIR", str(Path(__file__).resolve().parent.parent / "catalog")))
     sources: list[Source] = [CatalogSource(root)]
     config_path = os.getenv("QUIETLEAF_HTML_SOURCES", "")

@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from quietleaf_service.adapters import CatalogSource, HtmlSource, SourceError
-from quietleaf_service.app import make_app
+from quietleaf_service.app import build_from_env, make_app
 
 
 @pytest.fixture
@@ -122,3 +122,27 @@ def test_aggregate_search_survives_failed_source():
     result = client.get("/v1/search", params={"q": "lighthouse"}).json()
     assert result["items"][0]["id"] == "lighthouse-demo"
     assert result["errors"] == [{"source": "offline", "message": "Source temporarily unavailable"}]
+
+
+def test_build_from_env_loads_working_directory_dotenv(tmp_path, monkeypatch):
+    catalog = tmp_path / "catalog"
+    catalog.mkdir()
+    (catalog / "catalog.json").write_text('{"name":"AMP test","books":[]}', encoding="utf-8")
+    archive = tmp_path / "archive"
+    (tmp_path / ".env").write_text(
+        "QUIETLEAF_API_TOKEN=amp-file-token\n"
+        f"QUIETLEAF_CATALOG_DIR={catalog.as_posix()}\n"
+        f"QUIETLEAF_ARCHIVE_DIR={archive.as_posix()}\n",
+        encoding="utf-8",
+    )
+    for name in ("QUIETLEAF_API_TOKEN", "QUIETLEAF_CATALOG_DIR", "QUIETLEAF_ARCHIVE_DIR"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    with TestClient(build_from_env()) as amp_client:
+        assert amp_client.get("/v1/health").status_code == 401
+        health = amp_client.get(
+            "/v1/health", headers={"Authorization": "Bearer amp-file-token"}
+        )
+        assert health.status_code == 200
+        assert health.json()["sources"] == [{"id": "collection", "name": "AMP test"}]
