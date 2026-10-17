@@ -69,6 +69,55 @@ def test_novelping_search_and_details():
     assert [b["id"] for b in adapter.recent()] == [BOOK]
 
 
+def test_novelping_home_feed_paths_bounds_deduplication_and_cache():
+    requested = []
+
+    def listing(section):
+        cards = "".join(
+            f'<h3 class="novel-title"><a href="/book/{section}-{number}">{section.title()} {number}</a></h3>'
+            for number in range(22)
+        )
+        return f'<div id="search-results">{cards}{cards[:cards.find("</h3>") + 5]}</div>'
+
+    def featured(request):
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nAllow: /\n")
+        requested.append(str(request.url))
+        sections = {
+            ("/sort/popular", None): "popular",
+            ("/sort/complete", None): "completed",
+            ("/sort/updates", None): "fresh",
+            ("/sort/popular", "NEW"): "new",
+            ("/sort/hot", None): "hot",
+        }
+        section = sections.get((request.url.path, request.url.params.get("sort")))
+        return httpx.Response(200 if section else 404, text=listing(section) if section else "")
+
+    adapter = source(featured)
+    first = adapter.home_feed()
+    assert requested == [
+        "https://novelping.com/sort/popular",
+        "https://novelping.com/sort/complete",
+        "https://novelping.com/sort/updates",
+        "https://novelping.com/sort/popular?sort=NEW",
+        "https://novelping.com/sort/hot",
+    ]
+    assert list(first) == ["popular", "completed", "fresh", "new", "hot"]
+    for category, books in first.items():
+        assert len(books) == 20
+        assert len({book["id"] for book in books}) == 20
+        assert all(book["id"].startswith(f"{category}-") for book in books)
+
+    first["popular"][0]["title"] = "Changed by caller"
+    second = adapter.home_feed()
+    assert len(requested) == 5
+    assert second["popular"][0]["title"] == "Popular 0"
+    with TestClient(make_app([adapter], "local-token")) as api:
+        result = api.get("/v1/home", headers={"Authorization": "Bearer local-token"}).json()
+    assert len(requested) == 5
+    assert all(book["source"] == "novelping" for category in adapter.HOME_PATHS for book in result[category])
+
+
 def test_novelping_chapters_order_and_duplicate_rejection():
     adapter = source(routes)
     chapters = adapter.chapters(BOOK)

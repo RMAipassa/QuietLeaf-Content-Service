@@ -124,6 +124,50 @@ def test_aggregate_search_survives_failed_source():
     assert result["errors"] == [{"source": "offline", "message": "Source temporarily unavailable"}]
 
 
+def test_home_feed_is_authenticated_and_handles_optional_or_failed_sources():
+    class HomeSource:
+        id = "featured"
+        name = "Featured"
+
+        def home_feed(self):
+            item = {
+                "id": "featured-book", "title": "Featured Book", "author": "A. Writer",
+                "description": "", "coverUrl": "", "genre": "Fantasy", "source": "spoofed",
+            }
+            return {category: [item, item] for category in ("popular", "completed", "fresh", "new", "hot")}
+
+    class NoHomeSource:
+        id = "ordinary"
+        name = "Ordinary"
+
+    class FailedHomeSource:
+        name = "Offline"
+
+        def __init__(self, number):
+            self.id = f"offline-{number}"
+
+        def home_feed(self):
+            raise RuntimeError("private upstream failure details")
+
+    sources = [HomeSource(), NoHomeSource(), *(FailedHomeSource(number) for number in range(25))]
+    with TestClient(make_app(sources, "local-dev-token")) as home_client:
+        assert home_client.get("/v1/home").status_code == 401
+        response = home_client.get("/v1/home", headers=auth())
+
+    assert response.status_code == 200
+    result = response.json()
+    assert list(result) == ["popular", "completed", "fresh", "new", "hot", "errors"]
+    for category in ("popular", "completed", "fresh", "new", "hot"):
+        assert len(result[category]) == 1
+        assert result[category][0]["source"] == "featured"
+        assert result[category][0]["id"] == "featured-book"
+    assert len(result["errors"]) == 20
+    assert result["errors"][0] == {
+        "source": "offline-0", "message": "Source temporarily unavailable",
+    }
+    assert "private upstream failure details" not in response.text
+
+
 def test_build_from_env_loads_working_directory_dotenv(tmp_path, monkeypatch):
     catalog = tmp_path / "catalog"
     catalog.mkdir()
@@ -135,7 +179,8 @@ def test_build_from_env_loads_working_directory_dotenv(tmp_path, monkeypatch):
         f"QUIETLEAF_ARCHIVE_DIR={archive.as_posix()}\n",
         encoding="utf-8",
     )
-    for name in ("QUIETLEAF_API_TOKEN", "QUIETLEAF_CATALOG_DIR", "QUIETLEAF_ARCHIVE_DIR"):
+    for name in ("QUIETLEAF_API_TOKEN", "QUIETLEAF_CATALOG_DIR", "QUIETLEAF_ARCHIVE_DIR",
+                 "QUIETLEAF_ENABLE_NOVELPING"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.chdir(tmp_path)
 

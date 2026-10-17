@@ -1,4 +1,4 @@
-# QuietLeaf Content Service (v0.7)
+# QuietLeaf Content Service (v0.8)
 
 A small Python HTTPS-ready API **separate** from the Android reader. It supplies books through configured adapters while QuietLeaf stores progress and downloaded chapters locally. Running the service is optional: Gutenberg and imports work without it. When using the service, you need a reachable server; the app rejects plain HTTP.
 
@@ -127,6 +127,12 @@ If the website uses a different search route, set `QUIETLEAF_NOVELPING_SEARCH_PA
 
 NovelBin is not preconfigured. It can use the generic adapter when you have a workable, permissible source and stable HTML. An adapter configuration does not grant rights to a novel.
 
+## New in v0.8: Android home shelves
+
+- Authenticated `GET /v1/home` supplies Popular Now, Completed Stories, Fresh Updates, New Releases, and Hot Reads to the Android home screen.
+- NovelPing categories use its real popular, completed, latest, recently added, and trending pages rather than relabeling duplicate search results.
+- The bounded feed is cached for ten minutes, isolated per source, and continues to use the adapter's HTTPS, robots, redirect, response-size, and rate-limit controls.
+
 ## New in v0.7: AMP hosting, service console, and complete chapter lists
 
 - CubeCoders AMP's native Python App Runner can install and run the service directly without Docker; `install-amp.sh` and `amp-start.sh` remain available for manual Linux deployments.
@@ -206,6 +212,7 @@ Use a private network, an API token, and HTTPS when exposing the server beyond l
 | `GET /admin` | Browser-based service console shell |
 | `GET /v1/health` | Versioned service identity, source list and archive status |
 | `GET /v1/search?q=...&genre=...` | Search across all registered sources |
+| `GET /v1/home` | Bounded home shelves for supported sources: popular, completed, fresh, new, and hot |
 | `GET /v1/recent` | Recently updated books where known |
 | `GET /v1/books/{source}/{id}` | Book details |
 | `GET /v1/books/{source}/{id}/chapters` | Ordered chapter metadata including `downloadable` |

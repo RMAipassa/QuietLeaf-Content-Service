@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import copy
 import re
+import threading
+import time
 from urllib.parse import quote, urlsplit
 
 from bs4 import BeautifulSoup
@@ -9,6 +12,15 @@ from .adapters import HtmlSource, SourceError, require_id
 
 
 class NovelPingSource(HtmlSource):
+    HOME_PATHS = {
+        "popular": "/sort/popular",
+        "completed": "/sort/complete",
+        "fresh": "/sort/updates",
+        "new": "/sort/popular?sort=NEW",
+        "hot": "/sort/hot",
+    }
+    HOME_CACHE_SECONDS = 10 * 60
+
     def __init__(self, base_url: str = "https://novelping.com", search_path: str = "/search?keyword={query}", client=None,
                  image_hosts: tuple[str, ...] = (), access_authorized: bool = False):
         if not search_path.startswith("/") or not search_path.count("{query}") == 1 or search_path.startswith("//"):
@@ -27,6 +39,9 @@ class NovelPingSource(HtmlSource):
         self.search_path = search_path
         self.agent = "QuietLeafPersonalReader/0.3"
         self.access_authorized = access_authorized
+        self._home_cache = None
+        self._home_cached_at = float("-inf")
+        self._home_lock = threading.Lock()
 
     def _page(self, path: str) -> BeautifulSoup:
         target = self._guard_url(path)
@@ -132,6 +147,18 @@ class NovelPingSource(HtmlSource):
 
     def recent(self) -> list[dict]:
         return self._book_entries(self._page("/"))
+
+    def home_feed(self) -> dict[str, list[dict]]:
+        with self._home_lock:
+            if self._home_cache is not None and time.monotonic() - self._home_cached_at < self.HOME_CACHE_SECONDS:
+                return copy.deepcopy(self._home_cache)
+            feed = {
+                category: self._book_entries(self._page(path))[:20]
+                for category, path in self.HOME_PATHS.items()
+            }
+            self._home_cache = feed
+            self._home_cached_at = time.monotonic()
+            return copy.deepcopy(feed)
 
     @staticmethod
     def _field(page: BeautifulSoup, label: str) -> str:

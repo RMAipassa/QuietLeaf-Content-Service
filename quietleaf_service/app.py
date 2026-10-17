@@ -160,6 +160,50 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
             result["items"] = [item for item in result["items"] if item["source"] == source]
         return result
 
+    @app.get("/v1/home")
+    def home():
+        categories = ("popular", "completed", "fresh", "new", "hot")
+        result = {category: [] for category in categories}
+        seen = {category: set() for category in categories}
+        errors = []
+        for src in sources:
+            capability = getattr(src, "home_feed", None)
+            if not callable(capability):
+                continue
+            try:
+                feed = capability()
+                if not isinstance(feed, dict):
+                    raise TypeError("Invalid home feed")
+                additions = {category: [] for category in categories}
+                pending = {category: set() for category in categories}
+                for category in categories:
+                    entries = feed.get(category, [])
+                    if not isinstance(entries, list):
+                        raise TypeError("Invalid home feed section")
+                    for entry in entries:
+                        if not isinstance(entry, dict):
+                            raise TypeError("Invalid home feed item")
+                        key = (src.id, entry["id"])
+                        if key in seen[category] or key in pending[category]:
+                            continue
+                        item = {**entry, "source": src.id}
+                        if archive and archive.has_cover(src.id, entry["id"]):
+                            item["coverArchived"] = True
+                        additions[category].append((key, item))
+                        pending[category].add(key)
+                        if len(result[category]) + len(additions[category]) >= 20:
+                            break
+            except Exception:
+                if len(errors) < 20:
+                    errors.append({"source": src.id, "message": "Source temporarily unavailable"})
+                continue
+            for category in categories:
+                for key, item in additions[category]:
+                    seen[category].add(key)
+                    result[category].append(item)
+        result["errors"] = errors
+        return result
+
     @app.get("/v1/recent")
     def recent():
         return combined(sources, "recent")
