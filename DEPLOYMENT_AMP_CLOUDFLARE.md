@@ -66,19 +66,22 @@ Use AMP's File Manager to create `.env` in the app's root working directory, nex
 
 ```dotenv
 QUIETLEAF_API_TOKEN=replace-with-a-long-random-secret
+QUIETLEAF_ADMIN_PASSWORD=replace-with-a-long-unique-password
 QUIETLEAF_ENABLE_NOVELPING=0
 QUIETLEAF_NOVELPING_ACCESS_AUTHORIZED=0
 QUIETLEAF_NOVELPING_DELAY_SECONDS=1.0
 QUIETLEAF_AUTO_ARCHIVE_MAX_CHAPTERS=0
 ```
 
-Generate the token outside AMP, for example:
+Generate the API token outside AMP, for example:
 
 ```bash
 openssl rand -hex 32
 ```
 
 QuietLeaf loads this file directly from the Python App Runner working directory. Normal process environment variables take precedence over values in `.env`.
+
+Use a separate admin password containing at least 12 characters. If it is omitted, the dashboard temporarily accepts `QUIETLEAF_API_TOKEN` as its password so an upgrade cannot lock you out.
 
 Only enable NovelPing after confirming you are authorized to access and automate that source:
 
@@ -169,7 +172,7 @@ Open the dashboard at:
 https://quietleaf.example.com/admin
 ```
 
-Enter the same API token from `.env`. The browser stores it only in the current tab's session storage.
+Enter `QUIETLEAF_ADMIN_PASSWORD`. QuietLeaf stores a signed session in an HTTP-only, secure, same-site cookie for 30 days, so browser restarts and service updates do not require another sign-in. Use **Log out** to remove it. Changing the admin password invalidates all existing sessions.
 
 In the Android app, configure:
 
@@ -192,7 +195,7 @@ For a Git-backed instance:
 Operational rules:
 
 - Run exactly one QuietLeaf instance and one Uvicorn worker against an archive directory.
-- Keep `.env`, Git credentials, and archive backups private.
+- Keep `.env`, Git credentials, the admin password, and archive backups private.
 - Rotate both the GitHub token and `QUIETLEAF_API_TOKEN` if either is exposed.
 - Delete completed jobs from the dashboard when their EPUB files are no longer needed.
 - Use the dashboard's stop action before restarting an active automatic archive check.

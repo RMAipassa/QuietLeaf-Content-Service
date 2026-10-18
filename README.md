@@ -12,7 +12,8 @@ Requirements: Python 3.11+.
 python -m venv .venv
 . .venv/bin/activate
 pip install -e '.[test]'
-QUIETLEAF_API_TOKEN='generate-a-long-random-token' ./run.sh
+QUIETLEAF_API_TOKEN='generate-a-long-random-token' \
+QUIETLEAF_ADMIN_PASSWORD='choose-a-long-unique-password' ./run.sh
 ```
 
 The server is now listening only on `127.0.0.1:8765`. Chapters archived by the service are stored persistently in `archive/archive.sqlite3` (configurable with `QUIETLEAF_ARCHIVE_DIR`). It has a small **original fictional book** containing two downloadable text chapters and one metadata-only chapter. Check locally with:
@@ -24,7 +25,9 @@ curl -H 'Authorization: Bearer generate-a-long-random-token' \
 
 On Android, go to **Settings > Manage sources > Self-hosted content service** and enter its HTTPS URL and token. Find the new **My content service** tab in Discover. The sample chapters are safe test content; your own permitted catalog can replace them.
 
-Open `http://127.0.0.1:8765/admin` and enter the same token to use the private service console. It shows runtime status, saved novels, archive jobs, and automatic checks, and can stop checks or permanently delete archives.
+Open `http://127.0.0.1:8765/admin` and enter `QUIETLEAF_ADMIN_PASSWORD` to use the private service console. It shows runtime status, saved novels, archive jobs, and automatic checks, and can stop checks or permanently delete archives. The browser receives an HTTP-only session cookie that remains valid for 30 days and survives service restarts. Logging out removes the cookie; changing the configured password invalidates existing sessions.
+
+The admin password must contain at least 12 characters. If `QUIETLEAF_ADMIN_PASSWORD` is not set, the console accepts `QUIETLEAF_API_TOKEN` as a temporary compatibility fallback. Configure a separate password so the API token never needs to be entered into a browser.
 
 ### CubeCoders AMP Python App Runner
 
@@ -48,6 +51,7 @@ The service includes `Dockerfile` and `compose.yaml` for machines running Docker
 
 ```bash
 export QUIETLEAF_API_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export QUIETLEAF_ADMIN_PASSWORD='choose-a-long-unique-password'
 docker compose up --build -d
 ```
 
@@ -141,7 +145,7 @@ NovelBin is not preconfigured. It can use the generic adapter when you have a wo
 - `/healthz` provides a minimal unauthenticated process probe for AMP and Cloudflare monitoring. It exposes no archive or source details.
 - NovelPing authorized mode reads the full chapter archive instead of treating the short book-page preview as the complete list.
 
-The admin shell contains no private data. Its token is kept only in browser memory, while every data and management request continues to require the configured Bearer token.
+The admin shell contains no private data. It exchanges the configured admin password for a signed HTTP-only session cookie; Android and other API clients continue to use the configured Bearer token.
 
 ## New in v0.6 — covers saved with novel archives
 
@@ -231,7 +235,7 @@ Use a private network, an API token, and HTTPS when exposing the server beyond l
 | `GET /v1/archive/books/{source}/{id}` | Archived-chapter count and storage size |
 | `DELETE /v1/archive/books/{source}/{id}` | Permanently delete an archived book |
 
-Every `/v1` endpoint requires `Authorization: Bearer <token>` when `QUIETLEAF_API_TOKEN` is configured. The public `/admin` shell contains no service data and `/healthz` returns only process status. No accounts, ads or commercial services are needed by this backend; the private archive uses local SQLite. Access tokens are stored in the Android app's private preferences; they are not hardware-backed encrypted. Use a low-privilege token dedicated to this service.
+Every `/v1` endpoint requires `Authorization: Bearer <token>` when `QUIETLEAF_API_TOKEN` is configured. The admin console may instead use its signed, HTTP-only, same-site session cookie; browser write requests also require a custom confirmation header to prevent cross-site form submissions. The public `/admin` shell contains no service data and `/healthz` returns only process status. No accounts, ads or commercial services are needed by this backend; the private archive uses local SQLite. Access tokens are stored in the Android app's private preferences; they are not hardware-backed encrypted. Use a low-privilege token dedicated to this service.
 
 ## Tests
 

@@ -5,7 +5,7 @@
   const loginPanel = byId("login-panel");
   const consolePanel = byId("console");
   const loginForm = byId("login-form");
-  const tokenInput = byId("token-input");
+  const passwordInput = byId("password-input");
   const loginError = byId("login-error");
   const lockButton = byId("lock-button");
   const refreshButton = byId("refresh-button");
@@ -13,7 +13,7 @@
   const bookFilter = byId("book-filter");
   const notice = byId("notice");
 
-  let token = "";
+  let authenticated = false;
   let timer = null;
   let refreshing = false;
   let state = { health: null, books: [], booksTotal: 0, jobs: [], follows: [] };
@@ -36,26 +36,41 @@
   }
 
   function lock(message = "") {
-    token = "";
+    authenticated = false;
     state = { health: null, books: [], booksTotal: 0, jobs: [], follows: [] };
     window.clearInterval(timer);
     timer = null;
     consolePanel.hidden = true;
     loginPanel.hidden = false;
     lockButton.hidden = true;
-    tokenInput.value = "";
+    passwordInput.value = "";
     loginError.textContent = message;
     setConnection(false);
-    tokenInput.focus();
+    passwordInput.focus();
   }
 
-  async function api(path, options = {}) {
+  function openConsole() {
+    authenticated = true;
+    loginPanel.hidden = true;
+    consolePanel.hidden = false;
+    lockButton.hidden = false;
+    loginError.textContent = "";
+    setConnection(true);
+  }
+
+  async function api(path, options = {}, lockOnUnauthorized = true) {
     const headers = new Headers(options.headers || {});
-    headers.set("Authorization", `Bearer ${token}`);
     headers.set("Accept", "application/json");
-    const response = await fetch(path, { ...options, headers, cache: "no-store" });
+    const method = (options.method || "GET").toUpperCase();
+    if (!["GET", "HEAD"].includes(method)) headers.set("X-QuietLeaf-Admin", "1");
+    const response = await fetch(path, {
+      ...options,
+      headers,
+      cache: "no-store",
+      credentials: "same-origin",
+    });
     if (response.status === 401) {
-      lock("The token was rejected or has changed.");
+      if (lockOnUnauthorized) lock("Your admin session expired. Sign in again.");
       throw new Error("Authentication failed");
     }
     if (!response.ok) {
@@ -219,7 +234,7 @@
   }
 
   async function refresh() {
-    if (!token || refreshing) return;
+    if (!authenticated || refreshing) return;
     refreshing = true;
     refreshButton.disabled = true;
     showNotice("");
@@ -236,7 +251,7 @@
       };
       render();
     } catch (error) {
-      if (token) showNotice(`Could not refresh the console: ${error.message}`);
+      if (authenticated) showNotice(`Could not refresh the console: ${error.message}`);
     } finally {
       refreshing = false;
       refreshButton.disabled = false;
@@ -300,23 +315,60 @@
   loginForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     loginError.textContent = "";
-    token = tokenInput.value;
-    tokenInput.value = "";
+    const submitButton = loginForm.querySelector("button[type='submit']");
+    submitButton.disabled = true;
     try {
-      await api("/v1/health");
-      loginPanel.hidden = true;
-      consolePanel.hidden = false;
-      lockButton.hidden = false;
-      setConnection(true);
+      const response = await fetch("/admin/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Accept": "application/json" },
+        body: JSON.stringify({ password: passwordInput.value }),
+        cache: "no-store",
+        credentials: "same-origin",
+      });
+      if (!response.ok) {
+        let detail = `Sign-in failed with HTTP ${response.status}`;
+        try {
+          const body = await response.json();
+          if (body.detail) detail = body.detail;
+        } catch (_) {
+          // Keep the status-based message for non-JSON failures.
+        }
+        throw new Error(detail);
+      }
+      passwordInput.value = "";
+      openConsole();
       await refresh();
       timer = window.setInterval(refresh, 15000);
     } catch (error) {
-      if (token) loginError.textContent = error.message;
+      if (!authenticated) loginError.textContent = error.message;
+    } finally {
+      submitButton.disabled = false;
     }
   });
 
-  lockButton.addEventListener("click", () => lock());
+  lockButton.addEventListener("click", async () => {
+    lockButton.disabled = true;
+    try {
+      await api("/admin/logout", { method: "POST" });
+      lock();
+    } catch (error) {
+      if (authenticated) showNotice(`Could not log out: ${error.message}`);
+    } finally {
+      lockButton.disabled = false;
+    }
+  });
   refreshButton.addEventListener("click", refresh);
   homeCacheButton.addEventListener("click", refreshHomeShelves);
   bookFilter.addEventListener("input", renderBooks);
+
+  (async () => {
+    try {
+      await api("/v1/health", {}, false);
+      openConsole();
+      await refresh();
+      timer = window.setInterval(refresh, 15000);
+    } catch (_) {
+      lock();
+    }
+  })();
 })();

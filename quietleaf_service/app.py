@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import secrets
+import time
 from contextlib import asynccontextmanager
+from ipaddress import ip_address
 from pathlib import Path
+from threading import Lock
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
@@ -27,9 +32,20 @@ class ArchiveBatch(BaseModel):
     items: list[BookSelection] = Field(min_length=1, max_length=50)
 
 
+ADMIN_COOKIE = "quietleaf_admin"
+ADMIN_SESSION_SECONDS = 30 * 24 * 60 * 60
+ADMIN_LOGIN_BODY_BYTES = 16 * 1024
+LOGIN_ATTEMPT_LIMIT = 5
+LOGIN_ATTEMPT_WINDOW = 5 * 60
+MAX_TRACKED_LOGIN_ADDRESSES = 4096
+
+
 def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = None,
              archive_max_bytes: int = 2 * 1024 * 1024 * 1024,
-             follow_interval: int = 3600, active_interval: int = 1800) -> FastAPI:
+             follow_interval: int = 3600, active_interval: int = 1800,
+             admin_password: str = "") -> FastAPI:
+    if admin_password and not 12 <= len(admin_password) <= 1024:
+        raise ValueError("Admin password must contain between 12 and 1024 characters")
     by_id = {source.id: source for source in sources}
     if len(by_id) != len(sources):
         raise ValueError("Duplicate source identifier")
@@ -50,23 +66,95 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
     app.state.archive_store = archive
     web_root = Path(__file__).with_name("web")
     app.mount("/admin/assets", StaticFiles(directory=web_root), name="admin-assets")
+    effective_admin_password = admin_password or token
+    session_key = hashlib.scrypt(
+        effective_admin_password.encode("utf-8"),
+        salt=b"quietleaf-admin-session-v1",
+        n=2 ** 14,
+        r=8,
+        p=1,
+        dklen=32,
+    ) if effective_admin_password else b""
+    failed_logins: dict[str, list[float]] = {}
+    failed_login_lock = Lock()
     public_paths = {
         "/", "/admin", "/admin/", "/healthz",
         "/admin/assets/admin.css", "/admin/assets/admin.js",
     }
+    protected_response_paths = public_paths | {"/admin/login", "/admin/logout"}
+
+    def issue_admin_session() -> str:
+        payload = f"{int(time.time()) + ADMIN_SESSION_SECONDS}.{secrets.token_urlsafe(24)}"
+        signature = hmac.new(session_key, payload.encode("ascii"), hashlib.sha256).hexdigest()
+        return f"{payload}.{signature}"
+
+    def valid_admin_session(value: str) -> bool:
+        if not value or not session_key:
+            return False
+        try:
+            payload, supplied_signature = value.rsplit(".", 1)
+            expires_text, _ = payload.split(".", 1)
+            expires = int(expires_text)
+            payload_bytes = payload.encode("ascii")
+            supplied_signature_bytes = bytes.fromhex(supplied_signature)
+        except (TypeError, UnicodeEncodeError, ValueError):
+            return False
+        expected_signature = hmac.new(session_key, payload_bytes, hashlib.sha256).digest()
+        return (secrets.compare_digest(supplied_signature_bytes, expected_signature) and
+                expires >= int(time.time()))
+
+    def login_retry_after(address: str) -> int:
+        now = time.monotonic()
+        with failed_login_lock:
+            for stored_address, attempts in list(failed_logins.items()):
+                recent = [attempt for attempt in attempts if now - attempt < LOGIN_ATTEMPT_WINDOW]
+                if recent:
+                    failed_logins[stored_address] = recent
+                else:
+                    failed_logins.pop(stored_address, None)
+            recent = failed_logins.get(address, [])
+            if len(recent) < LOGIN_ATTEMPT_LIMIT:
+                return 0
+            return max(1, int(LOGIN_ATTEMPT_WINDOW - (now - recent[0])))
+
+    def record_failed_login(address: str) -> None:
+        with failed_login_lock:
+            if address not in failed_logins and len(failed_logins) >= MAX_TRACKED_LOGIN_ADDRESSES:
+                failed_logins.pop(next(iter(failed_logins)))
+            failed_logins.setdefault(address, []).append(time.monotonic())
+
+    def clear_failed_logins(address: str) -> None:
+        with failed_login_lock:
+            failed_logins.pop(address, None)
+
+    def use_secure_cookie(request: Request) -> bool:
+        forwarded_scheme = request.headers.get("x-forwarded-proto", "").partition(",")[0].strip()
+        if request.url.scheme == "https" or forwarded_scheme == "https":
+            return True
+        hostname = request.url.hostname or ""
+        try:
+            local = ip_address(hostname).is_loopback
+        except ValueError:
+            local = hostname.casefold() == "localhost"
+        return not local
 
     @app.middleware("http")
     async def bearer_auth(request, call_next):
-        public = request.method in {"GET", "HEAD"} and request.url.path in public_paths
-        if token and not public:
+        public = ((request.method in {"GET", "HEAD"} and request.url.path in public_paths) or
+                  (request.method == "POST" and request.url.path == "/admin/login"))
+        if (token or admin_password) and not public:
             scheme, separator, supplied = request.headers.get("authorization", "").partition(" ")
-            valid = (separator and scheme.lower() == "bearer" and supplied and
-                     secrets.compare_digest(supplied.encode("utf-8"), token.encode("utf-8")))
-            if not valid:
-                return JSONResponse({"detail": "Invalid API token"}, status_code=401,
+            valid_bearer = bool(token and separator and scheme.lower() == "bearer" and supplied and
+                                secrets.compare_digest(supplied.encode("utf-8"), token.encode("utf-8")))
+            valid_session = valid_admin_session(request.cookies.get(ADMIN_COOKIE, ""))
+            if not valid_bearer and not valid_session:
+                return JSONResponse({"detail": "Authentication required"}, status_code=401,
                                     headers={"WWW-Authenticate": "Bearer"})
+            if (valid_session and not valid_bearer and request.method not in {"GET", "HEAD"} and
+                    request.headers.get("x-quietleaf-admin") != "1"):
+                return JSONResponse({"detail": "Admin request confirmation required"}, status_code=403)
         response = await call_next(request)
-        if request.url.path in public_paths:
+        if request.url.path in protected_response_paths:
             response.headers["Cache-Control"] = "no-store"
             response.headers["Content-Security-Policy"] = (
                 "default-src 'none'; script-src 'self'; style-src 'self'; "
@@ -91,6 +179,62 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
     def health_probe():
         return {"status": "ok"}
 
+    @app.post("/admin/login", include_in_schema=False)
+    async def admin_login(request: Request, response: Response):
+        if not effective_admin_password:
+            raise HTTPException(status_code=503, detail="Admin password is not configured")
+        address = request.client.host if request.client else "unknown"
+        retry_after = login_retry_after(address)
+        if retry_after:
+            raise HTTPException(status_code=429, detail="Too many login attempts",
+                                headers={"Retry-After": str(retry_after)})
+        try:
+            declared_size = int(request.headers.get("content-length", "0"))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid request size")
+        if declared_size > ADMIN_LOGIN_BODY_BYTES:
+            raise HTTPException(status_code=413, detail="Login request is too large")
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > ADMIN_LOGIN_BODY_BYTES:
+                raise HTTPException(status_code=413, detail="Login request is too large")
+            body.extend(chunk)
+        try:
+            login_data = json.loads(body)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raise HTTPException(status_code=422, detail="Password is required")
+        password = login_data.get("password") if isinstance(login_data, dict) else None
+        if not isinstance(password, str) or not 1 <= len(password) <= 1024:
+            raise HTTPException(status_code=422, detail="Password is required")
+        valid = secrets.compare_digest(
+            password.encode("utf-8"), effective_admin_password.encode("utf-8")
+        )
+        if not valid:
+            record_failed_login(address)
+            raise HTTPException(status_code=401, detail="Invalid admin password")
+        clear_failed_logins(address)
+        response.set_cookie(
+            ADMIN_COOKIE,
+            issue_admin_session(),
+            max_age=ADMIN_SESSION_SECONDS,
+            path="/",
+            secure=use_secure_cookie(request),
+            httponly=True,
+            samesite="strict",
+        )
+        return {"authenticated": True, "expiresInSeconds": ADMIN_SESSION_SECONDS}
+
+    @app.post("/admin/logout", include_in_schema=False)
+    def admin_logout(request: Request, response: Response):
+        response.delete_cookie(
+            ADMIN_COOKIE,
+            path="/",
+            secure=use_secure_cookie(request),
+            httponly=True,
+            samesite="strict",
+        )
+        return {"authenticated": False}
+
     def source_for(source_id: str) -> Source:
         try:
             return by_id[require_id(source_id)]
@@ -100,8 +244,8 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
     def writable_archive() -> ArchiveStore:
         if archive is None:
             raise HTTPException(status_code=501, detail="Archive is not configured")
-        if not token:
-            raise HTTPException(status_code=403, detail="Set an API token before enabling archive management")
+        if not (token or admin_password):
+            raise HTTPException(status_code=403, detail="Set an API token or admin password before enabling archive management")
         return archive
 
     def apply(method, *args):
@@ -385,9 +529,15 @@ def build_from_env() -> FastAPI:
         ))
     archive_dir = Path(os.getenv("QUIETLEAF_ARCHIVE_DIR", str(Path(__file__).resolve().parent.parent / "archive")))
     archive_cap = int(os.getenv("QUIETLEAF_ARCHIVE_MAX_BYTES", str(2 * 1024 * 1024 * 1024)))
-    return make_app(sources, os.getenv("QUIETLEAF_API_TOKEN", ""), archive_dir, archive_cap,
-                    int(os.getenv("QUIETLEAF_FOLLOW_INTERVAL_SECONDS", "3600")),
-                    int(os.getenv("QUIETLEAF_ACTIVE_INTERVAL_SECONDS", "1800")))
+    return make_app(
+        sources,
+        token=os.getenv("QUIETLEAF_API_TOKEN", ""),
+        archive_dir=archive_dir,
+        archive_max_bytes=archive_cap,
+        follow_interval=int(os.getenv("QUIETLEAF_FOLLOW_INTERVAL_SECONDS", "3600")),
+        active_interval=int(os.getenv("QUIETLEAF_ACTIVE_INTERVAL_SECONDS", "1800")),
+        admin_password=os.getenv("QUIETLEAF_ADMIN_PASSWORD", ""),
+    )
 
 
 app = build_from_env()
