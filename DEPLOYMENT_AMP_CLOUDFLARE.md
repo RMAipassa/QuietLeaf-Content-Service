@@ -11,6 +11,7 @@ This deployment runs QuietLeaf natively in CubeCoders AMP's **Python App Runner*
 - A private DNS hostname, such as `quietleaf.example.com`.
 
 Keep this service single-instance and single-worker. Archive state is stored locally and is not designed for multiple concurrent processes.
+The home feed is also process-local: one background worker refreshes supported sources immediately at startup and every five minutes.
 
 ## 2. Create the instance
 
@@ -122,6 +123,17 @@ Expected responses include:
 
 and an authenticated service status from `/v1/health`.
 
+The first home-feed refresh runs in the background, so process startup and health checks do not wait for NovelPing. Until that refresh succeeds, authenticated `GET /v1/home` returns empty shelves for that source plus its generic unavailable error. Afterwards, reads return the last-good in-memory snapshot immediately, including while a newer refresh is running or has failed.
+
+To request an immediate refresh for all refresh-capable sources, use:
+
+```bash
+curl -X DELETE -H "Authorization: Bearer YOUR_TOKEN" \
+  http://127.0.0.1:7777/v1/home/cache
+```
+
+The request waits for the current or requested refresh cycle to finish, while concurrent home reads keep serving the previous snapshot. Multiple manual requests coalesce and do not overlap upstream work.
+
 If startup fails with a missing package, run AMP's **Update** action again and confirm the setup command completed successfully. Do not add a second Uvicorn worker to work around startup issues.
 
 ## 6. Configure Cloudflare Tunnel
@@ -195,6 +207,7 @@ For a Git-backed instance:
 Operational rules:
 
 - Run exactly one QuietLeaf instance and one Uvicorn worker against an archive directory.
+- Expect the process-local home cache to start cold after every service restart; its immediate background refresh repopulates it.
 - Keep `.env`, Git credentials, the admin password, and archive backups private.
 - Rotate both the GitHub token and `QUIETLEAF_API_TOKEN` if either is exposed.
 - Delete completed jobs from the dashboard when their EPUB files are no longer needed.

@@ -134,9 +134,11 @@ NovelBin is not preconfigured. It can use the generic adapter when you have a wo
 ## New in v0.8: Android home shelves
 
 - Authenticated `GET /v1/home` supplies Popular Now, Completed Stories, Fresh Updates, New Releases, and Hot Reads to the Android home screen.
-- Authenticated `DELETE /v1/home/cache` clears cached home shelves so they can be fetched again without restarting the service.
+- Authenticated `DELETE /v1/home/cache` requests an immediate background refresh and waits for that refresh without making home reads wait.
 - NovelPing categories use its real popular, completed, latest, recently added, and trending pages rather than relabeling duplicate search results.
-- The bounded feed is cached for ten minutes, isolated per source, and continues to use the adapter's HTTPS, robots, redirect, response-size, and rate-limit controls.
+- A single process-local worker refreshes supported sources at startup and every five minutes. `GET /v1/home` only reads a deep-copied last-good in-memory snapshot, so it never waits on NovelPing network access.
+- During cold startup, before the first successful refresh, NovelPing contributes empty shelves and the existing generic source error. A failed refresh leaves the previous complete snapshot intact, and refresh failures are isolated per source.
+- Manual requests coalesce with an in-progress refresh. Deploy with one Uvicorn worker so all requests share the same in-memory snapshot and worker.
 
 ## New in v0.7: AMP hosting, service console, and complete chapter lists
 
@@ -218,7 +220,7 @@ Use a private network, an API token, and HTTPS when exposing the server beyond l
 | `GET /v1/health` | Versioned service identity, source list and archive status |
 | `GET /v1/search?q=...&genre=...` | Search across all registered sources |
 | `GET /v1/home` | Bounded home shelves for supported sources: popular, completed, fresh, new, and hot |
-| `DELETE /v1/home/cache` | Clear cached home shelves for an immediate manual refresh |
+| `DELETE /v1/home/cache` | Request an immediate home-shelf refresh and wait for it to finish |
 | `GET /v1/recent` | Recently updated books where known |
 | `GET /v1/books/{source}/{id}` | Book details |
 | `GET /v1/books/{source}/{id}/chapters` | Ordered chapter metadata including `downloadable` |

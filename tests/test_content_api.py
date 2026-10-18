@@ -1,4 +1,5 @@
 import json
+import threading
 from pathlib import Path
 
 import httpx
@@ -168,25 +169,49 @@ def test_home_feed_is_authenticated_and_handles_optional_or_failed_sources():
     assert "private upstream failure details" not in response.text
 
 
+def test_home_feed_sections_are_bounded_across_sources():
+    class HomeSource:
+        name = "Featured"
+
+        def __init__(self, source_id):
+            self.id = source_id
+
+        def home_feed(self):
+            items = [{
+                "id": f"{self.id}-{number}", "title": f"Book {number}",
+                "author": "Writer", "description": "", "coverUrl": "", "genre": "",
+            } for number in range(15)]
+            return {category: items for category in ("popular", "completed", "fresh", "new", "hot")}
+
+    with TestClient(make_app([HomeSource("first"), HomeSource("second")])) as home_client:
+        result = home_client.get("/v1/home").json()
+
+    assert all(len(result[category]) == 20
+               for category in ("popular", "completed", "fresh", "new", "hot"))
+
+
 def test_home_cache_clear_is_authenticated_and_calls_supported_sources():
     class CachedHomeSource:
         id = "cached"
         name = "Cached"
 
         def __init__(self):
-            self.clear_count = 0
+            self.refresh_count = 0
+            self.refreshed = threading.Event()
 
-        def clear_home_cache(self):
-            self.clear_count += 1
+        def refresh_home_feed(self, _stop_event):
+            self.refresh_count += 1
+            self.refreshed.set()
 
     source = CachedHomeSource()
     with TestClient(make_app([source], "local-dev-token")) as home_client:
+        assert source.refreshed.wait(1)
         assert home_client.delete("/v1/home/cache").status_code == 401
         response = home_client.delete("/v1/home/cache", headers=auth())
 
     assert response.status_code == 200
     assert response.json() == {"clearedSources": 1}
-    assert source.clear_count == 1
+    assert source.refresh_count == 2
 
 
 def test_build_from_env_loads_working_directory_dotenv(tmp_path, monkeypatch):

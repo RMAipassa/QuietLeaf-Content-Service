@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -20,6 +21,7 @@ from dotenv import load_dotenv
 from . import __version__
 from .adapters import CatalogSource, HtmlSource, Source, SourceError, require_id
 from .archive import ArchiveStore, ArchiveWorker
+from .home import HomeFeedWorker
 from .novelping import NovelPingSource
 
 
@@ -51,19 +53,27 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
         raise ValueError("Duplicate source identifier")
     archive = ArchiveStore(archive_dir, archive_max_bytes, follow_interval, active_interval) if archive_dir else None
     worker = ArchiveWorker(archive, sources) if archive else None
+    home_feed_worker = HomeFeedWorker(sources)
 
     @asynccontextmanager
     async def lifespan(_):
-        if worker:
-            worker.start()
-        yield
-        if worker:
-            worker.stop()
+        try:
+            home_feed_worker.start()
+            if worker:
+                worker.start()
+            yield
+        finally:
+            try:
+                home_feed_worker.stop()
+            finally:
+                if worker:
+                    worker.stop()
 
     app = FastAPI(title="QuietLeaf Content API", version=__version__, docs_url=None,
                   redoc_url=None, lifespan=lifespan)
     app.state.archive_worker = worker
     app.state.archive_store = archive
+    app.state.home_feed_worker = home_feed_worker
     web_root = Path(__file__).with_name("web")
     app.mount("/admin/assets", StaticFiles(directory=web_root), name="admin-assets")
     effective_admin_password = admin_password or token
@@ -325,6 +335,8 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
                     if not isinstance(entries, list):
                         raise TypeError("Invalid home feed section")
                     for entry in entries:
+                        if len(result[category]) + len(additions[category]) >= 20:
+                            break
                         if not isinstance(entry, dict):
                             raise TypeError("Invalid home feed item")
                         key = (src.id, entry["id"])
@@ -335,8 +347,6 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
                             item["coverArchived"] = True
                         additions[category].append((key, item))
                         pending[category].add(key)
-                        if len(result[category]) + len(additions[category]) >= 20:
-                            break
             except Exception:
                 if len(errors) < 20:
                     errors.append({"source": src.id, "message": "Source temporarily unavailable"})
@@ -349,14 +359,10 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
         return result
 
     @app.delete("/v1/home/cache")
-    def clear_home_cache():
-        cleared = 0
-        for src in sources:
-            clear = getattr(src, "clear_home_cache", None)
-            if callable(clear):
-                apply(clear)
-                cleared += 1
-        return {"clearedSources": cleared}
+    async def clear_home_cache():
+        target = home_feed_worker.request_refresh()
+        await asyncio.to_thread(home_feed_worker.wait_for, target)
+        return {"clearedSources": home_feed_worker.source_count}
 
     @app.get("/v1/recent")
     def recent():

@@ -1,3 +1,5 @@
+import threading
+
 import httpx
 import pytest
 from fastapi.testclient import TestClient
@@ -71,6 +73,8 @@ def test_novelping_search_and_details():
 
 def test_novelping_home_feed_paths_bounds_deduplication_and_cache():
     requested = []
+    fail_refresh = False
+    stop_after_popular = None
 
     def listing(section):
         cards = "".join(
@@ -91,9 +95,18 @@ def test_novelping_home_feed_paths_bounds_deduplication_and_cache():
             ("/sort/hot", None): "hot",
         }
         section = sections.get((request.url.path, request.url.params.get("sort")))
+        if stop_after_popular is not None and section == "popular":
+            stop_after_popular.set()
+        if fail_refresh and section == "fresh":
+            return httpx.Response(503)
         return httpx.Response(200 if section else 404, text=listing(section) if section else "")
 
     adapter = source(featured)
+    with pytest.raises(SourceError, match="not been refreshed"):
+        adapter.home_feed()
+    assert requested == []
+
+    adapter.refresh_home_feed()
     first = adapter.home_feed()
     assert requested == [
         "https://novelping.com/sort/popular",
@@ -112,14 +125,19 @@ def test_novelping_home_feed_paths_bounds_deduplication_and_cache():
     second = adapter.home_feed()
     assert len(requested) == 5
     assert second["popular"][0]["title"] == "Popular 0"
-    adapter.clear_home_cache()
+
+    stop_after_popular = threading.Event()
+    adapter.refresh_home_feed(stop_after_popular)
+    assert len(requested) == 6
+    assert adapter.home_feed()["popular"][0]["title"] == "Popular 0"
+
+    stop_after_popular = None
+    fail_refresh = True
+    with pytest.raises(SourceError, match="HTTP 503"):
+        adapter.refresh_home_feed()
     third = adapter.home_feed()
-    assert len(requested) == 10
+    assert len(requested) == 9
     assert third["popular"][0]["title"] == "Popular 0"
-    with TestClient(make_app([adapter], "local-token")) as api:
-        result = api.get("/v1/home", headers={"Authorization": "Bearer local-token"}).json()
-    assert len(requested) == 10
-    assert all(book["source"] == "novelping" for category in adapter.HOME_PATHS for book in result[category])
 
 
 def test_novelping_chapters_order_and_duplicate_rejection():
