@@ -11,12 +11,20 @@
   const refreshButton = byId("refresh-button");
   const homeCacheButton = byId("home-cache-button");
   const bookFilter = byId("book-filter");
+  const configurationForm = byId("configuration-form");
+  const archiveConcurrency = byId("archive-concurrency");
+  const followInterval = byId("follow-interval");
+  const activeInterval = byId("active-interval");
+  const configurationStatus = byId("configuration-status");
+  const configurationSave = byId("configuration-save");
   const notice = byId("notice");
 
   let authenticated = false;
   let timer = null;
   let refreshing = false;
-  let state = { health: null, books: [], booksTotal: 0, jobs: [], follows: [] };
+  let configurationDirty = false;
+  let configurationRevision = 0;
+  let state = { health: null, configuration: null, books: [], booksTotal: 0, jobs: [], follows: [] };
 
   function node(tag, className = "", text = "") {
     const item = document.createElement(tag);
@@ -37,7 +45,8 @@
 
   function lock(message = "") {
     authenticated = false;
-    state = { health: null, books: [], booksTotal: 0, jobs: [], follows: [] };
+    state = { health: null, configuration: null, books: [], booksTotal: 0, jobs: [], follows: [] };
+    configurationDirty = false;
     window.clearInterval(timer);
     timer = null;
     consolePanel.hidden = true;
@@ -123,7 +132,9 @@
       ["Service", state.health.service],
       ["API protocol", String(state.health.version)],
       ["Release", state.health.releaseVersion || "Unknown"],
-      ["Archive worker", state.health.archiveWorkerRunning ? "Running" : "Not running"],
+      ["Archive workers", state.health.archiveWorkerRunning
+        ? `${state.health.archiveConcurrency} running, ${state.health.activeArchiveJobs} busy`
+        : "Not running"],
       ["Normal check interval", `${state.health.followIntervalSeconds || 0} seconds`],
       ["Active-book interval", `${state.health.activeIntervalSeconds || 0} seconds`],
       ["Sources", state.health.sources.map((source) => source.name).join(", ") || "None"],
@@ -134,6 +145,14 @@
       row.append(node("dt", "", label), node("dd", "", value));
       return row;
     }));
+  }
+
+  function renderConfiguration() {
+    if (!state.configuration || configurationDirty) return;
+    archiveConcurrency.value = String(state.configuration.archiveConcurrency);
+    followInterval.value = String(state.configuration.followIntervalSeconds / 60);
+    activeInterval.value = String(state.configuration.activeIntervalSeconds / 60);
+    configurationStatus.textContent = "Saved on this server";
   }
 
   function renderBooks() {
@@ -227,6 +246,7 @@
   function render() {
     renderSummary();
     renderService();
+    renderConfiguration();
     renderBooks();
     renderJobs();
     renderFollows();
@@ -236,14 +256,19 @@
   async function refresh() {
     if (!authenticated || refreshing) return;
     refreshing = true;
+    const startedConfigurationRevision = configurationRevision;
     refreshButton.disabled = true;
     showNotice("");
     try {
-      const [health, books, jobs, follows] = await Promise.all([
-        api("/v1/health"), api("/v1/archive/books"), api("/v1/archive/jobs"), api("/v1/archive/follows"),
+      const [health, configuration, books, jobs, follows] = await Promise.all([
+        api("/v1/health"), api("/v1/archive/config"), api("/v1/archive/books"),
+        api("/v1/archive/jobs"), api("/v1/archive/follows"),
       ]);
       state = {
         health,
+        configuration: startedConfigurationRevision === configurationRevision
+          ? configuration
+          : state.configuration,
         books: books.items,
         booksTotal: Number(books.total ?? books.items.length),
         jobs: jobs.items,
@@ -311,6 +336,49 @@
       homeCacheButton.disabled = false;
     }
   }
+
+  configurationForm.addEventListener("input", () => {
+    configurationDirty = true;
+    configurationStatus.textContent = "Unsaved changes";
+  });
+
+  configurationForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const concurrency = Number(archiveConcurrency.value);
+    const normalMinutes = Number(followInterval.value);
+    const activeMinutes = Number(activeInterval.value);
+    if (![concurrency, normalMinutes, activeMinutes].every(Number.isInteger)) {
+      showNotice("Operational settings must be whole numbers.");
+      return;
+    }
+    configurationSave.disabled = true;
+    configurationStatus.textContent = "Saving...";
+    try {
+      const configuration = await api("/v1/archive/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          archiveConcurrency: concurrency,
+          followIntervalSeconds: normalMinutes * 60,
+          activeIntervalSeconds: activeMinutes * 60,
+        }),
+      });
+      state.configuration = configuration;
+      state.health.archiveConcurrency = configuration.archiveConcurrency;
+      state.health.followIntervalSeconds = configuration.followIntervalSeconds;
+      state.health.activeIntervalSeconds = configuration.activeIntervalSeconds;
+      configurationDirty = false;
+      configurationRevision += 1;
+      renderConfiguration();
+      renderService();
+      showNotice("Operational settings saved and applied.");
+    } catch (error) {
+      configurationStatus.textContent = "Save failed";
+      showNotice(`Could not save operational settings: ${error.message}`);
+    } finally {
+      configurationSave.disabled = false;
+    }
+  });
 
   loginForm.addEventListener("submit", async (event) => {
     event.preventDefault();

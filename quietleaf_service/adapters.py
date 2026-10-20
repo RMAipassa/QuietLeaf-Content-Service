@@ -128,7 +128,7 @@ class HtmlSource:
         self._image_robots = {}
         self._robots_fetched = float("-inf")
         self._last_request = 0.0
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self.min_interval = max(1.0, float(config.get("minIntervalSeconds", 2)))
         self.agent = "QuietLeafSource/0.2 (+personal reader)"
 
@@ -151,22 +151,23 @@ class HtmlSource:
     def cover_image(self, cover_url: str) -> tuple[str, bytes]:
         target = self.image_url(cover_url)
         image_host = urlsplit(target).hostname
-        if image_host == self.host:
-            if time.monotonic() - self._robots_fetched > 3600:
-                self._page("/")
-            rules = self.robots
-        else:
-            now = time.monotonic()
-            cached = self._image_robots.get(image_host)
-            if cached is None or now - cached[0] > 3600:
-                contents = self._fetch(f"https://{image_host}/robots.txt", robots_request=True)
-                rules = RobotFileParser()
-                rules.parse(contents.splitlines())
-                self._image_robots[image_host] = (now, rules)
+        with self._lock:
+            if image_host == self.host:
+                if time.monotonic() - self._robots_fetched > 3600:
+                    self._page("/")
+                rules = self.robots
             else:
-                rules = cached[1]
-        if not rules.can_fetch(self.agent, target):
-            raise SourceError("robots.txt disallows the cover image")
+                now = time.monotonic()
+                cached = self._image_robots.get(image_host)
+                if cached is None or now - cached[0] > 3600:
+                    contents = self._fetch(f"https://{image_host}/robots.txt", robots_request=True)
+                    rules = RobotFileParser()
+                    rules.parse(contents.splitlines())
+                    self._image_robots[image_host] = (now, rules)
+                else:
+                    rules = cached[1]
+            if not rules.can_fetch(self.agent, target):
+                raise SourceError("robots.txt disallows the cover image")
         with self._lock:
             now = time.monotonic()
             delay = self.min_interval - (now - self._last_request)
@@ -212,13 +213,14 @@ class HtmlSource:
 
     def _page(self, path: str) -> BeautifulSoup:
         target = self._guard_url(path)
-        now = time.monotonic()
-        if now - self._robots_fetched > 3600:
-            robots = self._fetch(self._guard_url("/robots.txt"), robots_request=True)
-            self.robots.parse(robots.splitlines())
-            self._robots_fetched = time.monotonic()
-        if not self.robots.can_fetch(self.agent, target):
-            raise SourceError("robots.txt disallows this path")
+        with self._lock:
+            now = time.monotonic()
+            if now - self._robots_fetched > 3600:
+                robots = self._fetch(self._guard_url("/robots.txt"), robots_request=True)
+                self.robots.parse(robots.splitlines())
+                self._robots_fetched = time.monotonic()
+            if not self.robots.can_fetch(self.agent, target):
+                raise SourceError("robots.txt disallows this path")
         return BeautifulSoup(self._fetch(target), "html.parser")
 
     def _stable_id(self, url: str) -> str:

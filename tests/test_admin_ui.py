@@ -24,6 +24,8 @@ def test_admin_shell_is_public_but_contains_no_private_data(tmp_path):
         assert TOKEN not in page.text
         assert PASSWORD not in page.text
         assert "Admin password" in page.text
+        assert "Operational settings" in page.text
+        assert "archive-concurrency" in page.text
         assert "At the Lighthouse" not in page.text
         assert page.headers["cache-control"] == "no-store"
         assert "default-src 'none'" in page.headers["content-security-policy"]
@@ -34,6 +36,7 @@ def test_admin_shell_is_public_but_contains_no_private_data(tmp_path):
         script = client.get("/admin/assets/admin.js")
         assert script.status_code == 200
         assert "/v1/archive/books" in script.text
+        assert "/v1/archive/config" in script.text
         assert "/v1/home/cache" in script.text
         assert "Authorization" not in script.text
         assert client.get("/healthz").json() == {"status": "ok"}
@@ -53,8 +56,10 @@ def test_only_exact_admin_resources_bypass_bearer_auth(tmp_path):
 
         authorized = client.get("/v1/health", headers={"Authorization": f"Bearer {TOKEN}"})
         assert authorized.status_code == 200
-        assert authorized.json()["releaseVersion"] == "0.8.4"
+        assert authorized.json()["releaseVersion"] == "0.8.5"
         assert authorized.json()["archiveWorkerRunning"] is True
+        assert authorized.json()["archiveConcurrency"] == 3
+        assert authorized.json()["activeArchiveJobs"] == 0
 
 
 def test_admin_password_creates_persistent_secure_session(tmp_path):
@@ -177,7 +182,8 @@ def test_api_token_is_admin_password_fallback(tmp_path):
 
 def test_dashboard_management_endpoints_remain_authenticated(tmp_path):
     with make_client(tmp_path) as client:
-        paths = ["/v1/archive/books", "/v1/archive/jobs", "/v1/archive/follows"]
+        paths = ["/v1/archive/books", "/v1/archive/jobs", "/v1/archive/follows",
+                 "/v1/archive/config"]
         assert all(client.get(path).status_code == 401 for path in paths)
         headers = {"Authorization": f"Bearer {TOKEN}"}
         assert all(client.get(path, headers=headers).status_code == 200 for path in paths)
@@ -185,12 +191,51 @@ def test_dashboard_management_endpoints_remain_authenticated(tmp_path):
         assert books == {"items": [], "total": 0}
 
 
-def test_failed_job_without_a_book_can_be_cleared(tmp_path):
+def test_operational_configuration_is_validated_applied_and_persisted(tmp_path):
     with make_client(tmp_path) as client:
-        store = client.app.state.archive_store
-        store.follow("collection", "failed-book")
-        job = store.enqueue("collection", "failed-book")
-        store.update_job(job["id"], status="failed", error="No chapter list")
+        headers = {"Authorization": f"Bearer {TOKEN}"}
+        assert client.get("/v1/archive/config").status_code == 401
+        assert client.get("/v1/archive/config", headers=headers).json() == {
+            "archiveConcurrency": 3,
+            "followIntervalSeconds": 3600,
+            "activeIntervalSeconds": 1800,
+        }
+        invalid = client.put("/v1/archive/config", headers=headers, json={
+            "archiveConcurrency": 4,
+            "followIntervalSeconds": 3600,
+            "activeIntervalSeconds": 1800,
+        })
+        assert invalid.status_code == 422
+
+        saved = client.put("/v1/archive/config", headers=headers, json={
+            "archiveConcurrency": 2,
+            "followIntervalSeconds": 7200,
+            "activeIntervalSeconds": 2400,
+        })
+        assert saved.status_code == 200
+        assert saved.json() == {
+            "archiveConcurrency": 2,
+            "followIntervalSeconds": 7200,
+            "activeIntervalSeconds": 2400,
+        }
+        health = client.get("/v1/health", headers=headers).json()
+        assert health["archiveConcurrency"] == 2
+        assert health["followIntervalSeconds"] == 7200
+        assert health["activeIntervalSeconds"] == 2400
+
+    with make_client(tmp_path) as restarted:
+        headers = {"Authorization": f"Bearer {TOKEN}"}
+        assert restarted.get("/v1/archive/config", headers=headers).json() == saved.json()
+        assert restarted.app.state.archive_worker.concurrency == 2
+
+
+def test_failed_job_without_a_book_can_be_cleared(tmp_path):
+    client = make_client(tmp_path)
+    store = client.app.state.archive_store
+    store.follow("collection", "failed-book")
+    job = store.enqueue("collection", "failed-book")
+    store.update_job(job["id"], status="failed", error="No chapter list")
+    with client:
         headers = {"Authorization": f"Bearer {TOKEN}"}
 
         response = client.delete("/v1/archive/books/collection/failed-book", headers=headers)

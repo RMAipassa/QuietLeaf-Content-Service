@@ -223,11 +223,13 @@ def test_build_from_env_loads_working_directory_dotenv(tmp_path, monkeypatch):
         "QUIETLEAF_API_TOKEN=amp-file-token\n"
         "QUIETLEAF_ADMIN_PASSWORD=amp-dashboard-password\n"
         f"QUIETLEAF_CATALOG_DIR={catalog.as_posix()}\n"
-        f"QUIETLEAF_ARCHIVE_DIR={archive.as_posix()}\n",
+        f"QUIETLEAF_ARCHIVE_DIR={archive.as_posix()}\n"
+        "QUIETLEAF_ARCHIVE_CONCURRENCY=2\n",
         encoding="utf-8",
     )
     for name in ("QUIETLEAF_API_TOKEN", "QUIETLEAF_ADMIN_PASSWORD", "QUIETLEAF_CATALOG_DIR",
-                 "QUIETLEAF_ARCHIVE_DIR", "QUIETLEAF_ENABLE_NOVELPING"):
+                  "QUIETLEAF_ARCHIVE_DIR", "QUIETLEAF_ARCHIVE_CONCURRENCY",
+                  "QUIETLEAF_ENABLE_NOVELPING"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.chdir(tmp_path)
 
@@ -241,3 +243,4 @@ def test_build_from_env_loads_working_directory_dotenv(tmp_path, monkeypatch):
         )
         assert health.status_code == 200
         assert health.json()["sources"] == [{"id": "collection", "name": "AMP test"}]
+        assert health.json()["archiveConcurrency"] == 2

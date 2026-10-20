@@ -10,15 +10,25 @@ from uuid import uuid4
 from .adapters import MAX_TEXT_BYTES, Source, SourceError, require_id
 
 
+MIN_CHECK_INTERVAL_SECONDS = 1800
+MAX_CHECK_INTERVAL_SECONDS = 365 * 24 * 60 * 60
+MAX_ARCHIVE_CONCURRENCY = 3
+ARCHIVE_STOP_TIMEOUT_SECONDS = 15
+
+
 class ArchiveStore:
     def __init__(self, root: Path, max_bytes: int = 2 * 1024 * 1024 * 1024,
-                 poll_seconds: int = 3600, active_poll_seconds: int = 1800, active_days: int = 2):
+                 poll_seconds: int = 3600, active_poll_seconds: int = 1800,
+                 active_days: int = 2, archive_concurrency: int = 3):
+        if not 1 <= archive_concurrency <= MAX_ARCHIVE_CONCURRENCY:
+            raise ValueError(f"Archive concurrency must be between 1 and {MAX_ARCHIVE_CONCURRENCY}")
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.database = self.root / "archive.sqlite3"
         self.max_bytes = max_bytes
-        self.poll_seconds = max(1800, poll_seconds)
-        self.active_poll_seconds = max(1800, active_poll_seconds)
+        self.poll_seconds = max(MIN_CHECK_INTERVAL_SECONDS, poll_seconds)
+        self.active_poll_seconds = max(MIN_CHECK_INTERVAL_SECONDS, active_poll_seconds)
+        self.archive_concurrency = archive_concurrency
         self.active_days = max(1, active_days)
         self.lock = threading.RLock()
         with self._connect() as db:
@@ -48,6 +58,7 @@ class ArchiveStore:
                     status TEXT NOT NULL, total INTEGER NOT NULL DEFAULT 0,
                     downloaded INTEGER NOT NULL DEFAULT 0,
                     error TEXT NOT NULL DEFAULT '',
+                    run_token TEXT NOT NULL DEFAULT '',
                     created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS follows (
@@ -61,11 +72,40 @@ class ArchiveStore:
                     last_error TEXT NOT NULL DEFAULT '',
                     PRIMARY KEY(source, book_id)
                 );
+                CREATE TABLE IF NOT EXISTS configuration (
+                    key TEXT PRIMARY KEY, value INTEGER NOT NULL
+                );
                 CREATE INDEX IF NOT EXISTS follows_due ON follows(enabled, next_check_at);
                 CREATE INDEX IF NOT EXISTS chapters_by_book ON chapters(source, book_id, ordinal);
                 CREATE INDEX IF NOT EXISTS jobs_by_status ON jobs(status, created_at);
             """)
-            db.execute("UPDATE jobs SET status='queued' WHERE status='running'")
+            job_columns = {row["name"] for row in db.execute("PRAGMA table_info(jobs)").fetchall()}
+            if "run_token" not in job_columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN run_token TEXT NOT NULL DEFAULT ''")
+            db.execute("UPDATE jobs SET status='queued',run_token='' WHERE status='running'")
+            defaults = {
+                "archive_concurrency": self.archive_concurrency,
+                "follow_interval_seconds": self.poll_seconds,
+                "active_interval_seconds": self.active_poll_seconds,
+            }
+            for key, value in defaults.items():
+                db.execute("INSERT OR IGNORE INTO configuration(key,value) VALUES(?,?)",
+                           (key, value))
+            configured = {row["key"]: int(row["value"]) for row in db.execute(
+                "SELECT key,value FROM configuration"
+            ).fetchall()}
+            self.archive_concurrency = min(
+                MAX_ARCHIVE_CONCURRENCY,
+                max(1, configured.get("archive_concurrency", self.archive_concurrency)),
+            )
+            self.poll_seconds = max(
+                MIN_CHECK_INTERVAL_SECONDS,
+                configured.get("follow_interval_seconds", self.poll_seconds),
+            )
+            self.active_poll_seconds = max(
+                MIN_CHECK_INTERVAL_SECONDS,
+                configured.get("active_interval_seconds", self.active_poll_seconds),
+            )
 
     @contextmanager
     def _connect(self):
@@ -92,6 +132,14 @@ class ArchiveStore:
             "coverUrl": row["cover_url"], "genre": row["genre"],
             "archived": True, "coverArchived": bool(row["cover_archived"]),
         }
+
+    @staticmethod
+    def _job_row(row):
+        if not row:
+            return None
+        result = dict(row)
+        result.pop("run_token", None)
+        return result
 
     def save_book(self, source: str, book: dict):
         source = require_id(source)
@@ -239,6 +287,65 @@ class ArchiveStore:
             return self.active_poll_seconds
         return self.poll_seconds
 
+    def operational_settings(self) -> dict:
+        with self.lock:
+            return {
+                "archiveConcurrency": self.archive_concurrency,
+                "followIntervalSeconds": self.poll_seconds,
+                "activeIntervalSeconds": self.active_poll_seconds,
+            }
+
+    def update_operational_settings(self, archive_concurrency: int,
+                                    follow_interval_seconds: int,
+                                    active_interval_seconds: int) -> dict:
+        if not 1 <= archive_concurrency <= MAX_ARCHIVE_CONCURRENCY:
+            raise SourceError(f"Archive concurrency must be between 1 and {MAX_ARCHIVE_CONCURRENCY}")
+        for label, value in (
+            ("Normal check interval", follow_interval_seconds),
+            ("Active-book interval", active_interval_seconds),
+        ):
+            if not MIN_CHECK_INTERVAL_SECONDS <= value <= MAX_CHECK_INTERVAL_SECONDS:
+                raise SourceError(
+                    f"{label} must be between {MIN_CHECK_INTERVAL_SECONDS} and "
+                    f"{MAX_CHECK_INTERVAL_SECONDS} seconds"
+                )
+        with self.lock:
+            with self._connect() as db:
+                values = {
+                    "archive_concurrency": archive_concurrency,
+                    "follow_interval_seconds": follow_interval_seconds,
+                    "active_interval_seconds": active_interval_seconds,
+                }
+                for key, value in values.items():
+                    db.execute("""INSERT INTO configuration(key,value) VALUES(?,?)
+                                  ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+                               (key, value))
+                intervals_changed = (
+                    follow_interval_seconds != self.poll_seconds
+                    or active_interval_seconds != self.active_poll_seconds
+                )
+                if intervals_changed:
+                    stamp = int(time.time())
+                    rows = db.execute("""SELECT source,book_id,last_read_at,failure_count
+                                         FROM follows WHERE enabled=1""").fetchall()
+                    for row in rows:
+                        interval = (active_interval_seconds
+                                    if row["last_read_at"] >= stamp - self.active_days * 86400
+                                    else follow_interval_seconds)
+                        if row["failure_count"]:
+                            interval = min(86400, interval * 2 ** row["failure_count"])
+                        db.execute("""UPDATE follows SET next_check_at=?
+                                      WHERE source=? AND book_id=?""",
+                                   (stamp + interval, row["source"], row["book_id"]))
+            self.archive_concurrency = archive_concurrency
+            self.poll_seconds = follow_interval_seconds
+            self.active_poll_seconds = active_interval_seconds
+            return {
+                "archiveConcurrency": self.archive_concurrency,
+                "followIntervalSeconds": self.poll_seconds,
+                "activeIntervalSeconds": self.active_poll_seconds,
+            }
+
     def follow(self, source: str, book_id: str, now: int | None = None) -> dict:
         source, book_id = require_id(source), require_id(book_id)
         stamp = int(time.time()) if now is None else now
@@ -309,11 +416,12 @@ class ArchiveStore:
     def enqueue(self, source: str, book_id: str) -> dict:
         source, book_id = require_id(source), require_id(book_id)
         with self.lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
             row = db.execute("""SELECT * FROM jobs WHERE source=? AND book_id=?
                                 AND status IN ('queued','running','paused') ORDER BY created_at DESC LIMIT 1""",
                              (source, book_id)).fetchone()
             if row:
-                return dict(row)
+                return self._job_row(row)
             stamp = int(time.time())
             job_id = uuid4().hex
             db.execute("""INSERT INTO jobs(id,source,book_id,status,created_at,updated_at)
@@ -323,22 +431,36 @@ class ArchiveStore:
     def job(self, job_id: str):
         with self._connect() as db:
             row = db.execute("SELECT * FROM jobs WHERE id=?", (require_id(job_id),)).fetchone()
-        return dict(row) if row else None
+        return self._job_row(row)
 
     def jobs(self):
         with self._connect() as db:
-            return [dict(row) for row in db.execute(
+            return [self._job_row(row) for row in db.execute(
                 "SELECT * FROM jobs ORDER BY created_at DESC LIMIT 100").fetchall()]
 
-    def next_job(self):
+    def next_job(self, excluding: set[tuple[str, str]] | None = None):
+        excluded = excluding or set()
         with self.lock, self._connect() as db:
-            row = db.execute("""SELECT * FROM jobs WHERE status='queued'
-                                ORDER BY created_at, id LIMIT 1""").fetchone()
+            db.execute("BEGIN IMMEDIATE")
+            filters = ["status='queued'"]
+            params = []
+            for source, book_id in excluded:
+                filters.append("NOT (source=? AND book_id=?)")
+                params.extend((source, book_id))
+            row = db.execute(f"""SELECT * FROM jobs WHERE {' AND '.join(filters)}
+                                 ORDER BY created_at, id LIMIT 1""", params).fetchone()
             if not row:
                 return None
-            db.execute("UPDATE jobs SET status='running',updated_at=? WHERE id=?",
-                       (int(time.time()), row["id"]))
-            return dict(row)
+            stamp = int(time.time())
+            run_token = uuid4().hex
+            claimed = db.execute("""UPDATE jobs SET status='running',run_token=?,updated_at=?
+                                    WHERE id=? AND status='queued'""",
+                                 (run_token, stamp, row["id"])).rowcount
+            if not claimed:
+                return None
+            result = dict(row)
+            result.update(status="running", run_token=run_token, updated_at=stamp)
+            return result
 
     def update_job(self, job_id: str, status: str | None = None, total: int | None = None,
                    downloaded: int | None = None, error: str | None = None):
@@ -351,9 +473,164 @@ class ArchiveStore:
             values["downloaded"] = downloaded
         if error is not None:
             values["error"] = error[:300]
+        if status is not None and status != "running":
+            values["run_token"] = ""
         columns = ",".join(f"{key}=?" for key in values)
         with self.lock, self._connect() as db:
             db.execute(f"UPDATE jobs SET {columns} WHERE id=?", (*values.values(), require_id(job_id)))
+
+    @staticmethod
+    def _running_claim(db, job_id: str, run_token: str) -> bool:
+        return db.execute("""SELECT 1 FROM jobs
+                             WHERE id=? AND status='running' AND run_token=?""",
+                          (require_id(job_id), run_token)).fetchone() is not None
+
+    def update_job_if_running(self, job_id: str, run_token: str,
+                              status: str | None = None, total: int | None = None,
+                              downloaded: int | None = None, error: str | None = None) -> bool:
+        values = {"updated_at": int(time.time())}
+        if status is not None:
+            values["status"] = status
+            if status != "running":
+                values["run_token"] = ""
+        if total is not None:
+            values["total"] = total
+        if downloaded is not None:
+            values["downloaded"] = downloaded
+        if error is not None:
+            values["error"] = error[:300]
+        columns = ",".join(f"{key}=?" for key in values)
+        with self.lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            changed = db.execute(
+                f"UPDATE jobs SET {columns} WHERE id=? AND status='running' AND run_token=?",
+                (*values.values(), require_id(job_id), run_token),
+            ).rowcount
+        return bool(changed)
+
+    def finish_job_if_running(self, job_id: str, run_token: str, source: str,
+                              book_id: str, status: str, error: str = "") -> bool:
+        if status not in {"completed", "failed"}:
+            raise ValueError("Archive jobs can only finish as completed or failed")
+        source, book_id = require_id(source), require_id(book_id)
+        stamp = int(time.time())
+        with self.lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if not self._running_claim(db, job_id, run_token):
+                return False
+            follow = db.execute("""SELECT failure_count,last_read_at FROM follows
+                                   WHERE source=? AND book_id=?""",
+                                (source, book_id)).fetchone()
+            if follow:
+                failures = min(follow["failure_count"] + 1, 8) if error else 0
+                interval = self.interval_for(follow["last_read_at"], stamp)
+                if error:
+                    interval = min(86400, interval * 2 ** failures)
+                db.execute("""UPDATE follows SET last_checked_at=?,
+                              last_success_at=CASE WHEN ?='' THEN ? ELSE last_success_at END,
+                              last_error=?,failure_count=?,next_check_at=?
+                              WHERE source=? AND book_id=?""",
+                           (stamp, error, stamp, error[:300], failures, stamp + interval,
+                            source, book_id))
+            db.execute("""UPDATE jobs SET status=?,error=?,run_token='',updated_at=?
+                          WHERE id=? AND status='running' AND run_token=?""",
+                       (status, error[:300], stamp, require_id(job_id), run_token))
+            return True
+
+    def save_metadata_if_running(self, job_id: str, run_token: str,
+                                 source: str, book: dict, chapters: list[dict]) -> bool:
+        source = require_id(source)
+        book_id = require_id(book["id"])
+        if len(chapters) > 100_000:
+            raise SourceError("Book has too many chapters")
+        normalized = [
+            (require_id(chapter["id"]), chapter["title"], int(chapter.get("ordinal", index)))
+            for index, chapter in enumerate(chapters)
+        ]
+        with self.lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if not self._running_claim(db, job_id, run_token):
+                return False
+            db.execute("""
+                INSERT INTO books(source, id, title, author, description, cover_url, genre, updated_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source, id) DO UPDATE SET
+                    title=excluded.title, author=excluded.author,
+                    description=excluded.description, cover_url=excluded.cover_url,
+                    genre=excluded.genre, updated_at=excluded.updated_at
+            """, (source, book_id, book["title"], book.get("author", ""),
+                  book.get("description", ""), book.get("coverUrl", ""),
+                  book.get("genre", ""), int(time.time())))
+            for chapter_id, title, ordinal in normalized:
+                db.execute("""
+                    INSERT INTO chapters(source, book_id, id, title, ordinal)
+                    VALUES(?, ?, ?, ?, ?)
+                    ON CONFLICT(source, book_id, id) DO UPDATE SET
+                        title=excluded.title, ordinal=excluded.ordinal
+                """, (source, book_id, chapter_id, title, ordinal))
+            return True
+
+    def save_cover_if_running(self, job_id: str, run_token: str, source: str,
+                              book_id: str, mime_type: str, data: bytes) -> bool:
+        if len(data) > 2 * 1024 * 1024 or not data:
+            raise SourceError("Empty or oversized cover")
+        signatures = {
+            "image/jpeg": data.startswith(b"\xff\xd8\xff"),
+            "image/png": data.startswith(b"\x89PNG\r\n\x1a\n"),
+            "image/webp": data[:4] == b"RIFF" and data[8:12] == b"WEBP",
+            "image/gif": data.startswith((b"GIF87a", b"GIF89a")),
+        }
+        if not signatures.get(mime_type, False):
+            raise SourceError("Invalid cover image")
+        source, book_id = require_id(source), require_id(book_id)
+        with self.lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if not self._running_claim(db, job_id, run_token):
+                return False
+            old = db.execute("SELECT bytes FROM covers WHERE source=? AND book_id=?",
+                             (source, book_id)).fetchone()
+            used = db.execute("SELECT COALESCE(SUM(bytes),0) FROM chapters").fetchone()[0]
+            used += db.execute("SELECT COALESCE(SUM(bytes),0) FROM covers").fetchone()[0]
+            if used - (old["bytes"] if old else 0) + len(data) > self.max_bytes:
+                raise SourceError("Archive storage limit reached")
+            db.execute("""INSERT INTO covers(source,book_id,mime_type,data,bytes) VALUES(?,?,?,?,?)
+                          ON CONFLICT(source,book_id) DO UPDATE SET
+                          mime_type=excluded.mime_type,data=excluded.data,bytes=excluded.bytes""",
+                       (source, book_id, mime_type, data, len(data)))
+            return True
+
+    def save_text_if_running(self, job_id: str, run_token: str, source: str,
+                             book_id: str, chapter_id: str, body: str,
+                             downloaded: int) -> bool:
+        size = len(body.encode("utf-8"))
+        if not body.strip() or size > MAX_TEXT_BYTES:
+            raise SourceError("Empty or oversized chapter")
+        source, book_id, chapter_id = map(require_id, (source, book_id, chapter_id))
+        with self.lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if not self._running_claim(db, job_id, run_token):
+                return False
+            old = db.execute("SELECT bytes FROM chapters WHERE source=? AND book_id=? AND id=?",
+                             (source, book_id, chapter_id)).fetchone()
+            if old is None:
+                raise SourceError("Chapter is missing from the archive index")
+            used = db.execute("SELECT COALESCE(SUM(bytes),0) FROM chapters").fetchone()[0]
+            used += db.execute("SELECT COALESCE(SUM(bytes),0) FROM covers").fetchone()[0]
+            if used - old["bytes"] + size > self.max_bytes:
+                raise SourceError("Archive storage limit reached")
+            db.execute("""UPDATE chapters SET body=?, bytes=?, updated_at=?
+                          WHERE source=? AND book_id=? AND id=?""",
+                       (body, size, int(time.time()), source, book_id, chapter_id))
+            db.execute("""UPDATE jobs SET downloaded=?,updated_at=?
+                          WHERE id=? AND status='running' AND run_token=?""",
+                       (downloaded, int(time.time()), require_id(job_id), run_token))
+            return True
+
+    def requeue_if_running(self, job_id: str, run_token: str) -> None:
+        with self.lock, self._connect() as db:
+            db.execute("""UPDATE jobs SET status='queued',run_token='',updated_at=?
+                          WHERE id=? AND status='running' AND run_token=?""",
+                       (int(time.time()), require_id(job_id), run_token))
 
     def control(self, job_id: str, action: str):
         states = {
@@ -365,18 +642,30 @@ class ArchiveStore:
         if action not in states:
             raise SourceError("Unknown job action")
         accepted, target = states[action]
-        with self.lock:
-            current = self.job(job_id)
+        with self.lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            current = db.execute("SELECT * FROM jobs WHERE id=?",
+                                 (require_id(job_id),)).fetchone()
             if current is None:
                 raise SourceError("Job not found")
             if current["status"] not in accepted:
                 raise SourceError("Job action not possible from this state")
-            self.update_job(job_id, status=target, error="")
-            return self.job(job_id)
+            if target == "queued":
+                duplicate = db.execute("""SELECT 1 FROM jobs WHERE source=? AND book_id=?
+                                          AND id<>? AND status IN ('queued','running','paused')
+                                          LIMIT 1""",
+                                       (current["source"], current["book_id"], current["id"])).fetchone()
+                if duplicate:
+                    raise SourceError("Another archive job is already active for this novel")
+            db.execute("UPDATE jobs SET status=?,error='',run_token='',updated_at=? WHERE id=?",
+                       (target, int(time.time()), current["id"]))
+            updated = db.execute("SELECT * FROM jobs WHERE id=?", (current["id"],)).fetchone()
+            return self._job_row(updated)
 
     def delete_book(self, source: str, book_id: str):
         source, book_id = require_id(source), require_id(book_id)
         with self.lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
             active = db.execute("""SELECT 1 FROM jobs WHERE source=? AND book_id=?
                                     AND status IN ('queued','running','paused') LIMIT 1""",
                                 (source, book_id)).fetchone()
@@ -389,85 +678,213 @@ class ArchiveStore:
 
 
 class ArchiveWorker:
-    def __init__(self, store: ArchiveStore, sources: list[Source]):
+    def __init__(self, store: ArchiveStore, sources: list[Source], concurrency: int = 3):
+        if not 1 <= concurrency <= MAX_ARCHIVE_CONCURRENCY:
+            raise ValueError(f"Archive concurrency must be between 1 and {MAX_ARCHIVE_CONCURRENCY}")
         self.store = store
         self.sources = {source.id: source for source in sources}
+        self.concurrency = concurrency
         self.stop_signal = threading.Event()
-        self.wake_signal = threading.Event()
-        self.thread = None
+        self.condition = threading.Condition()
+        self.threads: dict[int, threading.Thread] = {}
+        self.active_books: set[tuple[str, str]] = set()
+        self.active_claims: dict[str, str] = {}
+        self.started = False
+
+    def _launch_thread(self, index: int) -> None:
+        thread = threading.Thread(target=self._run_slot, args=(index,), daemon=True,
+                                  name=f"quietleaf-archive-worker-{index + 1}")
+        self.threads[index] = thread
+        thread.start()
+
+    def _start_missing_threads(self) -> None:
+        for index in range(self.concurrency):
+            current = self.threads.get(index)
+            if current is not None and current.is_alive():
+                continue
+            self._launch_thread(index)
+
+    def _run_slot(self, index: int) -> None:
+        current = threading.current_thread()
+        try:
+            self.run(index)
+        finally:
+            with self.condition:
+                if (self.threads.get(index) is current and self.started
+                        and not self.stop_signal.is_set() and index < self.concurrency):
+                    self._launch_thread(index)
+                else:
+                    if self.threads.get(index) is current:
+                        self.threads.pop(index, None)
+                    if self.stop_signal.is_set() and not any(
+                        thread.is_alive() for thread in self.threads.values()
+                    ):
+                        self.started = False
 
     def start(self):
-        if self.thread is None:
-            self.thread = threading.Thread(target=self.run, daemon=True, name="quietleaf-archive-worker")
-            self.thread.start()
+        with self.condition:
+            old_threads = ([thread for thread in self.threads.values() if thread.is_alive()]
+                           if self.started and self.stop_signal.is_set() else [])
+        deadline = time.monotonic() + ARCHIVE_STOP_TIMEOUT_SECONDS
+        for thread in old_threads:
+            thread.join(timeout=max(0, deadline - time.monotonic()))
+        if any(thread.is_alive() for thread in old_threads):
+            raise RuntimeError("Archive workers are still stopping")
+        with self.condition:
+            if self.started and not self.stop_signal.is_set():
+                return
+            self.stop_signal.clear()
+            self.started = True
+            self._start_missing_threads()
 
     def stop(self):
-        self.stop_signal.set()
-        self.wake_signal.set()
-        if self.thread:
-            self.thread.join(timeout=2)
+        with self.condition:
+            self.stop_signal.set()
+            self.condition.notify_all()
+            threads = list(self.threads.values())
+        deadline = time.monotonic() + ARCHIVE_STOP_TIMEOUT_SECONDS
+        for thread in threads:
+            thread.join(timeout=max(0, deadline - time.monotonic()))
+        with self.condition:
+            claims = list(self.active_claims.items())
+            if not any(thread.is_alive() for thread in self.threads.values()):
+                self.started = False
+        for job_id, run_token in claims:
+            self.store.requeue_if_running(job_id, run_token)
+
+    def set_concurrency(self, concurrency: int) -> None:
+        if not 1 <= concurrency <= MAX_ARCHIVE_CONCURRENCY:
+            raise ValueError(f"Archive concurrency must be between 1 and {MAX_ARCHIVE_CONCURRENCY}")
+        with self.condition:
+            self.concurrency = concurrency
+            if self.started:
+                self._start_missing_threads()
+            self.condition.notify_all()
+
+    def update_operational_settings(self, archive_concurrency: int,
+                                    follow_interval_seconds: int,
+                                    active_interval_seconds: int) -> dict:
+        with self.condition:
+            settings = self.store.update_operational_settings(
+                archive_concurrency, follow_interval_seconds, active_interval_seconds
+            )
+            self.concurrency = settings["archiveConcurrency"]
+            if self.started:
+                self._start_missing_threads()
+            self.condition.notify_all()
+            return settings
 
     def wake(self):
-        self.wake_signal.set()
+        with self.condition:
+            self.condition.notify_all()
 
-    def run(self):
+    def is_running(self) -> bool:
+        with self.condition:
+            return (self.started and not self.stop_signal.is_set()
+                    and all(index in self.threads and self.threads[index].is_alive()
+                            for index in range(self.concurrency)))
+
+    def active_count(self) -> int:
+        with self.condition:
+            return len(self.active_books)
+
+    def delete_book(self, source: str, book_id: str) -> bool:
+        key = require_id(source), require_id(book_id)
+        with self.condition:
+            return self.store.delete_book(*key)
+
+    def run(self, index: int):
         while not self.stop_signal.is_set():
-            job = self.store.next_job()
-            if job:
-                self.process(job)
-                continue
-            due = self.store.reserve_due()
-            for source_id, book_id in due:
-                if source_id in self.sources:
-                    self.store.enqueue(source_id, book_id)
+            job = None
+            with self.condition:
+                if self.stop_signal.is_set() or index >= self.concurrency:
+                    current = threading.current_thread()
+                    if index >= self.concurrency and self.threads.get(index) is current:
+                        self.threads.pop(index, None)
+                    return
+                job = self.store.next_job(self.active_books)
+                if job:
+                    self.active_books.add((job["source"], job["book_id"]))
+                    self.active_claims[job["id"]] = job["run_token"]
                 else:
-                    self.store.record_check(source_id, book_id, "Source adapter not configured")
-            if due:
+                    due = self.store.reserve_due()
+                    for source_id, book_id in due:
+                        if source_id in self.sources:
+                            self.store.enqueue(source_id, book_id)
+                        else:
+                            self.store.record_check(source_id, book_id, "Source adapter not configured")
+                    if not due and not self.stop_signal.is_set():
+                        self.condition.wait(30)
+            if job:
+                try:
+                    self.process(job)
+                finally:
+                    if self.stop_signal.is_set():
+                        self.store.requeue_if_running(job["id"], job["run_token"])
+                    with self.condition:
+                        self.active_books.discard((job["source"], job["book_id"]))
+                        self.active_claims.pop(job["id"], None)
+                        self.condition.notify_all()
                 continue
-            self.wake_signal.wait(30)
-            self.wake_signal.clear()
 
     def process(self, job: dict):
         job_id, source_id, book_id = job["id"], job["source"], job["book_id"]
+        run_token = job["run_token"]
         adapter = self.sources.get(source_id)
         if not adapter:
-            self.store.update_job(job_id, status="failed", error="Source adapter is not configured")
-            self.store.record_check(source_id, book_id, "Source adapter not configured")
+            self.store.finish_job_if_running(
+                job_id, run_token, source_id, book_id, "failed",
+                "Source adapter is not configured"
+            )
             return
         try:
             details = adapter.details(book_id)
+            if self.stop_signal.is_set():
+                return
             chapter_list = adapter.chapters(book_id)
-            self.store.save_book(source_id, details)
+            if self.stop_signal.is_set():
+                return
+            if not self.store.save_metadata_if_running(
+                job_id, run_token, source_id, details, chapter_list
+            ):
+                return
             if details.get("coverUrl") and not self.store.has_cover(source_id, book_id):
                 fetch_cover = getattr(adapter, "cover_image", None)
                 if callable(fetch_cover):
                     try:
                         mime, binary = fetch_cover(details["coverUrl"])
-                        self.store.save_cover(source_id, book_id, mime, binary)
+                        if self.stop_signal.is_set():
+                            return
+                        if not self.store.save_cover_if_running(
+                            job_id, run_token, source_id, book_id, mime, binary
+                        ):
+                            return
                     except Exception:
                         pass
-            self.store.save_chapters(source_id, book_id, chapter_list)
             candidates = [ch for ch in chapter_list if ch.get("downloadable", False)]
             downloaded = sum(self.store.text(source_id, book_id, ch["id"]) is not None for ch in candidates)
-            self.store.update_job(job_id, total=len(candidates), downloaded=downloaded)
+            if not self.store.update_job_if_running(
+                job_id, run_token, total=len(candidates), downloaded=downloaded
+            ):
+                return
             for chapter in candidates:
                 if self.stop_signal.is_set():
-                    return
-                status = self.store.job(job_id)["status"]
-                if status != "running":
                     return
                 if self.store.text(source_id, book_id, chapter["id"]) is not None:
                     continue
                 body = adapter.text(book_id, chapter["id"])
-                if self.store.job(job_id)["status"] != "running":
+                if self.stop_signal.is_set():
                     return
-                self.store.save_text(source_id, book_id, chapter["id"], body)
+                if not self.store.save_text_if_running(
+                    job_id, run_token, source_id, book_id, chapter["id"], body,
+                    downloaded + 1
+                ):
+                    return
                 downloaded += 1
-                self.store.update_job(job_id, downloaded=downloaded)
-            if self.store.job(job_id)["status"] == "running":
-                self.store.record_check(source_id, book_id)
-                self.store.update_job(job_id, status="completed", error="")
+            self.store.finish_job_if_running(
+                job_id, run_token, source_id, book_id, "completed"
+            )
         except Exception as exc:
-            if self.store.job(job_id)["status"] == "running":
-                self.store.update_job(job_id, status="failed", error=str(exc)[:300])
-                self.store.record_check(source_id, book_id, str(exc)[:300])
+            self.store.finish_job_if_running(
+                job_id, run_token, source_id, book_id, "failed", str(exc)[:300]
+            )

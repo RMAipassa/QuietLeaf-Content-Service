@@ -66,6 +66,41 @@
         <dl id="service-details" class="detail-list"></dl>
       </section>
 
+      <section class="panel configuration-panel">
+        <div class="configuration-copy">
+          <p class="eyebrow">Persistent configuration</p>
+          <h2>Operational settings</h2>
+          <p class="muted">Tune background archiving without exposing credentials or filesystem settings. Changes are saved in the archive database and apply immediately.</p>
+        </div>
+        <form id="configuration-form" class="configuration-form">
+          <div class="configuration-grid">
+            <label class="configuration-field" for="archive-concurrency">
+              <span>Parallel novels</span>
+              <select id="archive-concurrency" required>
+                <option value="1">1 novel</option>
+                <option value="2">2 novels</option>
+                <option value="3">3 novels</option>
+              </select>
+              <small>Chapters within each novel stay sequential.</small>
+            </label>
+            <label class="configuration-field" for="follow-interval">
+              <span>Normal checks</span>
+              <input id="follow-interval" type="number" min="30" max="525600" step="1" required>
+              <small>Minutes between checks for followed novels.</small>
+            </label>
+            <label class="configuration-field" for="active-interval">
+              <span>Recently read checks</span>
+              <input id="active-interval" type="number" min="30" max="525600" step="1" required>
+              <small>Minutes between checks for recently read novels.</small>
+            </label>
+          </div>
+          <div class="configuration-actions">
+            <span id="configuration-status" class="muted">Saved on this server</span>
+            <button id="configuration-save" class="primary-button" type="submit">Save settings</button>
+          </div>
+        </form>
+      </section>
+
       <section class="panel">
         <div class="panel-heading">
           <div><p class="eyebrow">Persistent archive</p><h2>Saved novels</h2></div>

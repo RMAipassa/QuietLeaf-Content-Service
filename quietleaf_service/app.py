@@ -20,7 +20,13 @@ from dotenv import load_dotenv
 
 from . import __version__
 from .adapters import CatalogSource, HtmlSource, Source, SourceError, require_id
-from .archive import ArchiveStore, ArchiveWorker
+from .archive import (
+    MAX_ARCHIVE_CONCURRENCY,
+    MAX_CHECK_INTERVAL_SECONDS,
+    MIN_CHECK_INTERVAL_SECONDS,
+    ArchiveStore,
+    ArchiveWorker,
+)
 from .home import HomeFeedWorker
 from .novelping import NovelPingSource
 
@@ -34,6 +40,16 @@ class ArchiveBatch(BaseModel):
     items: list[BookSelection] = Field(min_length=1, max_length=50)
 
 
+class OperationalConfiguration(BaseModel):
+    archiveConcurrency: int = Field(ge=1, le=MAX_ARCHIVE_CONCURRENCY)
+    followIntervalSeconds: int = Field(
+        ge=MIN_CHECK_INTERVAL_SECONDS, le=MAX_CHECK_INTERVAL_SECONDS
+    )
+    activeIntervalSeconds: int = Field(
+        ge=MIN_CHECK_INTERVAL_SECONDS, le=MAX_CHECK_INTERVAL_SECONDS
+    )
+
+
 ADMIN_COOKIE = "quietleaf_admin"
 ADMIN_SESSION_SECONDS = 30 * 24 * 60 * 60
 ADMIN_LOGIN_BODY_BYTES = 16 * 1024
@@ -45,14 +61,17 @@ MAX_TRACKED_LOGIN_ADDRESSES = 4096
 def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = None,
              archive_max_bytes: int = 2 * 1024 * 1024 * 1024,
              follow_interval: int = 3600, active_interval: int = 1800,
-             admin_password: str = "") -> FastAPI:
+             admin_password: str = "", archive_concurrency: int = 3) -> FastAPI:
     if admin_password and not 12 <= len(admin_password) <= 1024:
         raise ValueError("Admin password must contain between 12 and 1024 characters")
     by_id = {source.id: source for source in sources}
     if len(by_id) != len(sources):
         raise ValueError("Duplicate source identifier")
-    archive = ArchiveStore(archive_dir, archive_max_bytes, follow_interval, active_interval) if archive_dir else None
-    worker = ArchiveWorker(archive, sources) if archive else None
+    archive = ArchiveStore(
+        archive_dir, archive_max_bytes, follow_interval, active_interval,
+        archive_concurrency=archive_concurrency,
+    ) if archive_dir else None
+    worker = ArchiveWorker(archive, sources, archive.archive_concurrency) if archive else None
     home_feed_worker = HomeFeedWorker(sources)
 
     @asynccontextmanager
@@ -294,7 +313,9 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
         return {"service": "quietleaf-content-api", "version": 1,
                 "releaseVersion": __version__,
                 "archiveEnabled": archive is not None,
-                "archiveWorkerRunning": bool(worker and worker.thread and worker.thread.is_alive()),
+                "archiveWorkerRunning": bool(worker and worker.is_running()),
+                "archiveConcurrency": worker.concurrency if worker else 0,
+                "activeArchiveJobs": worker.active_count() if worker else 0,
                 "followIntervalSeconds": archive.poll_seconds if archive else None,
                 "activeIntervalSeconds": archive.active_poll_seconds if archive else None,
                 "sources": [{"id": s.id, "name": s.name} for s in sources]}
@@ -457,8 +478,9 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
 
     @app.delete("/v1/archive/books/{source_id}/{book_id}")
     def delete_archived_book(source_id: str, book_id: str):
-        storage = writable_archive()
-        return {"deleted": apply(storage.delete_book, source_id, book_id)}
+        writable_archive()
+        source_id, book_id = apply(require_id, source_id), apply(require_id, book_id)
+        return {"deleted": apply(worker.delete_book, source_id, book_id)}
 
     @app.post("/v1/archive/{source_id}/{book_id}", status_code=202)
     def archive_book(source_id: str, book_id: str):
@@ -500,6 +522,21 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
     @app.get("/v1/archive/jobs")
     def archive_jobs():
         return {"items": writable_archive().jobs()}
+
+    @app.get("/v1/archive/config")
+    def archive_configuration():
+        return writable_archive().operational_settings()
+
+    @app.put("/v1/archive/config")
+    def update_archive_configuration(configuration: OperationalConfiguration):
+        writable_archive()
+        settings = apply(
+            worker.update_operational_settings,
+            configuration.archiveConcurrency,
+            configuration.followIntervalSeconds,
+            configuration.activeIntervalSeconds,
+        )
+        return settings
 
     @app.get("/v1/archive/jobs/{job_id}")
     def archive_job(job_id: str):
@@ -543,6 +580,7 @@ def build_from_env() -> FastAPI:
         follow_interval=int(os.getenv("QUIETLEAF_FOLLOW_INTERVAL_SECONDS", "3600")),
         active_interval=int(os.getenv("QUIETLEAF_ACTIVE_INTERVAL_SECONDS", "1800")),
         admin_password=os.getenv("QUIETLEAF_ADMIN_PASSWORD", ""),
+        archive_concurrency=int(os.getenv("QUIETLEAF_ARCHIVE_CONCURRENCY", "3")),
     )
 
 

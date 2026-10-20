@@ -25,7 +25,7 @@ curl -H 'Authorization: Bearer generate-a-long-random-token' \
 
 On Android, go to **Settings > Manage sources > Self-hosted content service** and enter its HTTPS URL and token. Find the new **My content service** tab in Discover. The sample chapters are safe test content; your own permitted catalog can replace them.
 
-Open `http://127.0.0.1:8765/admin` and enter `QUIETLEAF_ADMIN_PASSWORD` to use the private service console. It shows runtime status, saved novels, archive jobs, and automatic checks, and can stop checks or permanently delete archives. The browser receives an HTTP-only session cookie that remains valid for 30 days and survives service restarts. Logging out removes the cookie; changing the configured password invalidates existing sessions.
+Open `http://127.0.0.1:8765/admin` and enter `QUIETLEAF_ADMIN_PASSWORD` to use the private service console. It shows runtime status, saved novels, archive jobs, and automatic checks, and can stop checks, permanently delete archives, or update safe operational settings. The browser receives an HTTP-only session cookie that remains valid for 30 days and survives service restarts. Logging out removes the cookie; changing the configured password invalidates existing sessions.
 
 The admin password must contain at least 12 characters. If `QUIETLEAF_ADMIN_PASSWORD` is not set, the console accepts `QUIETLEAF_API_TOKEN` as a temporary compatibility fallback. Configure a separate password so the API token never needs to be entered into a browser.
 
@@ -167,7 +167,7 @@ Every full-book archive request also **follows** that novel. The server's own wo
 
 Default schedule: **once per 60 minutes per followed novel**. A novel read in the last 48 hours is checked **once per 30 minutes**. Requests are spaced according to each source adapter's rate limits; repeated failures back off exponentially to a maximum of 24 hours. Intervals can be changed using `QUIETLEAF_FOLLOW_INTERVAL_SECONDS` (default 3600) and `QUIETLEAF_ACTIVE_INTERVAL_SECONDS` (default 1800); 1800 seconds is the minimum enforced for each. The worker checks for due work every 30 seconds and prioritizes recently read books. Restarting the server preserves follow status, timestamps, scheduled checks and saved chapter text.
 
-To archive more than one book, the Android **Library > Select books to archive** action calls the batch endpoint. The batch size is limited to 50 unique books per request. Example:
+To archive more than one book, the Android **Library > Select books to archive** action calls the batch endpoint. The batch size is limited to 50 unique books per request. The service processes up to three different novels concurrently by default, while chapters within each novel remain sequential. Set `QUIETLEAF_ARCHIVE_CONCURRENCY` to `1`, `2`, or `3` to choose the initial limit, or update **Operational settings** in the admin console. Admin changes are stored in `archive.sqlite3`, apply immediately, and take precedence over environment defaults after restart. The same panel controls normal and recently-read follow intervals, with a minimum of 30 minutes. Continue using one Uvicorn worker process. Example:
 
 ```bash
 curl -X POST 'http://127.0.0.1:8765/v1/archive/batch' \
@@ -233,6 +233,8 @@ Use a private network, an API token, and HTTPS when exposing the server beyond l
 | `GET /v1/archive/jobs` | List recent archive jobs |
 | `GET /v1/archive/jobs/{job}` | View persistent job progress |
 | `POST /v1/archive/jobs/{job}/{action}` | Pause, resume, retry, or cancel |
+| `GET /v1/archive/config` | View persisted archive concurrency and follow intervals |
+| `PUT /v1/archive/config` | Validate, save, and immediately apply safe operational settings |
 | `GET /v1/archive/books` | List books saved in the server archive |
 | `GET /v1/archive/books/{source}/{id}` | Archived-chapter count and storage size |
 | `DELETE /v1/archive/books/{source}/{id}` | Permanently delete an archived book |
