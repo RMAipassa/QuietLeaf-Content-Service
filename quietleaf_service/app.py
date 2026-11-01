@@ -394,6 +394,8 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
         source_id, book_id = apply(require_id, source_id), apply(require_id, book_id)
         src = by_id.get(source_id)
         cached = archive.book(source_id, book_id) if archive else None
+        if cached:
+            return cached
         if src:
             try:
                 result = {"source": source_id, **src.details(book_id)}
@@ -401,15 +403,9 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
                     result["coverArchived"] = True
                 return result
             except SourceError as exc:
-                if cached:
-                    return cached
                 raise HTTPException(status_code=422, detail=str(exc))
             except Exception:
-                if cached:
-                    return cached
                 raise HTTPException(status_code=502, detail="Source offline and book not archived")
-        if cached:
-            return cached
         raise HTTPException(status_code=404, detail="Book not found")
 
     @app.get("/v1/books/{source_id}/{book_id}/cover")
@@ -427,7 +423,10 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
     def chapters(source_id: str, book_id: str):
         source_id, book_id = apply(require_id, source_id), apply(require_id, book_id)
         src = by_id.get(source_id)
+        cached_book = archive.book(source_id, book_id) if archive else None
         cached = archive.chapters(source_id, book_id) if archive else []
+        if cached_book:
+            return {"items": cached}
         if src:
             try:
                 fresh = src.chapters(book_id)
@@ -442,11 +441,7 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
                 merged.sort(key=lambda row: (row["ordinal"], row["id"]))
                 return {"items": merged}
             except Exception:
-                if cached:
-                    return {"items": cached}
                 raise HTTPException(status_code=502, detail="Source offline and chapter list not archived")
-        if cached:
-            return {"items": cached}
         raise HTTPException(status_code=404, detail="Chapter list not found")
 
     @app.get("/v1/books/{source_id}/{book_id}/chapters/{chapter_id}/text", response_class=PlainTextResponse)

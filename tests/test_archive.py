@@ -18,6 +18,8 @@ class ExampleSource:
         self.offline = False
         self.fail_chapter = ""
         self.calls = []
+        self.detail_calls = 0
+        self.chapter_calls = 0
         self.chapter_total = 3
 
     def _check(self):
@@ -33,11 +35,13 @@ class ExampleSource:
 
     def details(self, book_id):
         self._check()
+        self.detail_calls += 1
         return {"id": book_id, "title": "A Completely Original Test Story",
                 "author": "QuietLeaf Team", "description": "Archive fixture.", "genre": "Fiction", "coverUrl": ""}
 
     def chapters(self, book_id):
         self._check()
+        self.chapter_calls += 1
         return [{"id": f"chapter-{i}", "title": f"Chapter {i}", "ordinal": i,
                  "downloadable": True} for i in range(1, self.chapter_total + 1)]
 
@@ -123,6 +127,10 @@ def test_archive_remains_readable_after_source_goes_offline_and_adapter_removed(
         assert stats["chapterCount"] == 3
         assert stats["downloadedChapters"] == 3
         assert stats["storageBytes"] > 10
+        detail_calls, chapter_calls = source.detail_calls, source.chapter_calls
+        assert api.get("/v1/books/fixture/test-story", headers=authorized()).status_code == 200
+        assert len(api.get("/v1/books/fixture/test-story/chapters", headers=authorized()).json()["items"]) == 3
+        assert (source.detail_calls, source.chapter_calls) == (detail_calls, chapter_calls)
         source.offline = True
         assert api.get("/v1/books/fixture/test-story", headers=authorized()).json()["title"].startswith("A Completely")
         assert len(api.get("/v1/books/fixture/test-story/chapters", headers=authorized()).json()["items"]) == 3
