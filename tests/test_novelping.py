@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 from quietleaf_service.adapters import SourceError
 from quietleaf_service.app import make_app
-from quietleaf_service.novelping import NovelPingSource
+from quietleaf_service.novelping import MAX_CHAPTER_INDEX_BYTES, NovelPingSource
 
 
 BOOK = "test-novel"
@@ -229,6 +229,35 @@ def test_authorized_mode_rejects_an_unavailable_full_chapter_archive():
     )
     adapter.min_interval = 0
     with pytest.raises(SourceError, match="HTTP 503"):
+        adapter.chapters(BOOK)
+
+
+def test_authorized_mode_allows_a_large_bounded_chapter_archive():
+    large_archive = CHAPTER_ARCHIVE_HTML + (" " * (2 * 1024 * 1024))
+
+    def large(request):
+        if request.url.path == "/ajax/chapter-archive":
+            return httpx.Response(200, text=large_archive)
+        return httpx.Response(404)
+
+    adapter = NovelPingSource(
+        client=httpx.Client(transport=httpx.MockTransport(large), follow_redirects=False),
+        access_authorized=True,
+    )
+    adapter.min_interval = 0
+    assert len(adapter.chapters(BOOK)) == 4
+
+
+def test_authorized_mode_rejects_an_oversized_chapter_archive():
+    def oversized(_request):
+        return httpx.Response(200, text="x" * (MAX_CHAPTER_INDEX_BYTES + 1))
+
+    adapter = NovelPingSource(
+        client=httpx.Client(transport=httpx.MockTransport(oversized), follow_redirects=False),
+        access_authorized=True,
+    )
+    adapter.min_interval = 0
+    with pytest.raises(SourceError, match="too large"):
         adapter.chapters(BOOK)
 
 

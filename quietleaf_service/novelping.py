@@ -9,6 +9,8 @@ from bs4 import BeautifulSoup
 
 from .adapters import HtmlSource, SourceError, require_id
 
+MAX_CHAPTER_INDEX_BYTES = 8 * 1024 * 1024
+
 
 class NovelPingSource(HtmlSource):
     HOME_PATHS = {
@@ -215,7 +217,7 @@ class NovelPingSource(HtmlSource):
         book_id = require_id(book_id)
         if self.access_authorized:
             target = self._guard_url(f"/ajax/chapter-archive?novelId={quote(book_id, safe='')}")
-            page = BeautifulSoup(self._fetch(target), "html.parser")
+            page = BeautifulSoup(self._fetch(target, max_bytes=MAX_CHAPTER_INDEX_BYTES), "html.parser")
         else:
             page = self._page(f"/book/{book_id}")
         prefix = f"/book/{book_id}/"

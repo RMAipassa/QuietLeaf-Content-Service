@@ -193,23 +193,27 @@ class HtmlSource:
             return "image/gif", binary
         raise SourceError("Unsupported cover image format")
 
-    def _fetch(self, url: str, robots_request: bool = False) -> str:
+    def _fetch(self, url: str, robots_request: bool = False, max_bytes: int = MAX_TEXT_BYTES) -> str:
         with self._lock:
             now = time.monotonic()
             delay = self.min_interval - (now - self._last_request)
             if delay > 0:
                 time.sleep(delay)
             self._last_request = time.monotonic()
-            response = self.client.get(url, headers={"User-Agent": self.agent, "Accept": "text/html"})
-        if response.is_redirect:
-            raise SourceError("Redirect blocked; verify domain ownership and change configuration manually")
-        if response.status_code == 404 and robots_request:
-            return ""
-        if response.status_code != 200:
-            raise SourceError(f"Upstream returned HTTP {response.status_code}")
-        if len(response.content) > MAX_TEXT_BYTES:
-            raise SourceError("Upstream response is too large")
-        return response.text
+            with self.client.stream("GET", url, headers={"User-Agent": self.agent, "Accept": "text/html"}) as response:
+                if response.is_redirect:
+                    raise SourceError("Redirect blocked; verify domain ownership and change configuration manually")
+                if response.status_code == 404 and robots_request:
+                    return ""
+                if response.status_code != 200:
+                    raise SourceError(f"Upstream returned HTTP {response.status_code}")
+                encoding = response.encoding or "utf-8"
+                content = bytearray()
+                for chunk in response.iter_bytes():
+                    content.extend(chunk)
+                    if len(content) > max_bytes:
+                        raise SourceError("Upstream response is too large")
+        return bytes(content).decode(encoding, errors="replace")
 
     def _page(self, path: str) -> BeautifulSoup:
         target = self._guard_url(path)
