@@ -190,6 +190,40 @@ def test_home_feed_sections_are_bounded_across_sources():
                for category in ("popular", "completed", "fresh", "new", "hot"))
 
 
+def test_provider_filter_isolates_home_search_and_recent_requests():
+    calls = []
+
+    class Provider:
+        def __init__(self, source_id):
+            self.id = self.name = source_id
+
+        def entries(self, operation):
+            calls.append((self.id, operation))
+            return [{"id": str(number), "title": f"{self.id} Book {number}"} for number in range(25)]
+
+        def home_feed(self):
+            entries = self.entries("home")
+            return {key: entries for key in ("popular", "completed", "fresh", "new", "hot")}
+
+        def search(self, query, genre=""):
+            return self.entries("search")
+
+        def recent(self):
+            return self.entries("recent")
+
+    with TestClient(make_app([Provider("novelping"), Provider("wtr-lab")], "local-dev-token")) as api:
+        home = api.get("/v1/home", params={"source": "wtr-lab"}, headers=auth()).json()
+        assert len(home["popular"]) == 20
+        assert all(item["source"] == "wtr-lab" for item in home["popular"])
+        assert home["errors"] == []
+        for endpoint in ("search", "recent"):
+            result = api.get(f"/v1/{endpoint}", params={"source": "wtr-lab"}, headers=auth()).json()
+            assert all(item["source"] == "wtr-lab" for item in result["items"])
+        assert calls == [("wtr-lab", "home"), ("wtr-lab", "search"), ("wtr-lab", "recent")]
+        assert api.get("/v1/home", params={"source": "unknown"}, headers=auth()).status_code == 404
+        assert api.get("/v1/home", params={"source": "../bad"}, headers=auth()).status_code == 422
+
+
 def test_home_cache_clear_is_authenticated_and_calls_supported_sources():
     class CachedHomeSource:
         id = "cached"

@@ -337,12 +337,16 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
         return result
 
     @app.get("/v1/home")
-    def home():
+    def home(source: str = ""):
+        if source:
+            apply(require_id, source)
+            if source not in by_id:
+                raise HTTPException(status_code=404, detail="Unknown source")
         categories = ("popular", "completed", "fresh", "new", "hot")
         result = {category: [] for category in categories}
         seen = {category: set() for category in categories}
         errors = []
-        for src in sources:
+        for src in ([by_id[source]] if source else sources):
             capability = getattr(src, "home_feed", None)
             if not callable(capability):
                 continue
@@ -387,8 +391,15 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
         return {"clearedSources": home_feed_worker.source_count}
 
     @app.get("/v1/recent")
-    def recent():
-        return combined(sources, "recent")
+    def recent(source: str = ""):
+        if source:
+            apply(require_id, source)
+            if source not in by_id:
+                raise HTTPException(status_code=404, detail="Unknown source")
+        result = combined([by_id[source]] if source else sources, "recent")
+        if source:
+            result["items"] = [item for item in result["items"] if item["source"] == source]
+        return result
 
     @app.get("/v1/books/{source_id}/{book_id}")
     def book(source_id: str, book_id: str):

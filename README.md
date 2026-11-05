@@ -234,9 +234,9 @@ Use a private network, an API token, and HTTPS when exposing the server beyond l
 | `GET /admin` | Browser-based service console shell |
 | `GET /v1/health` | Versioned service identity, source list and archive status |
 | `GET /v1/search?q=...&genre=...` | Search across all registered sources |
-| `GET /v1/home` | Bounded home shelves for supported sources: popular, completed, fresh, new, and hot |
+| `GET /v1/home?source=...` | Bounded home shelves: popular, completed, fresh, new, and hot; optional source selects one provider before applying shelf limits |
 | `DELETE /v1/home/cache` | Request an immediate home-shelf refresh and wait for it to finish |
-| `GET /v1/recent` | Recently updated books where known |
+| `GET /v1/recent?source=...` | Recently updated books where known; optional source selects one provider |
 | `GET /v1/books/{source}/{id}` | Book details |
 | `GET /v1/books/{source}/{id}/chapters` | Ordered chapter metadata including `downloadable` |
 | `GET /v1/books/{source}/{id}/chapters/{chapter}/text` | Archived chapter first; otherwise live source text if available |
