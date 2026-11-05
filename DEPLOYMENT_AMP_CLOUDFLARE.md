@@ -70,6 +70,8 @@ QUIETLEAF_API_TOKEN=replace-with-a-long-random-secret
 QUIETLEAF_ADMIN_PASSWORD=replace-with-a-long-unique-password
 QUIETLEAF_ENABLE_NOVELPING=0
 QUIETLEAF_NOVELPING_ACCESS_AUTHORIZED=0
+QUIETLEAF_ENABLE_WTRLAB=0
+QUIETLEAF_WTRLAB_ACCESS_AUTHORIZED=0
 QUIETLEAF_NOVELPING_DELAY_SECONDS=1.0
 QUIETLEAF_AUTO_ARCHIVE_MAX_CHAPTERS=0
 ```
@@ -92,6 +94,15 @@ QUIETLEAF_NOVELPING_ACCESS_AUTHORIZED=1
 ```
 
 Keep NovelPing's delay at `1.0` seconds or higher. Set `QUIETLEAF_AUTO_ARCHIVE_MAX_CHAPTERS` to a positive limit only if new follows should automatically start bounded archive jobs.
+
+WTR-LAB also requires both an enable flag and confirmation that your authorization covers its public page, reader, and cover routes:
+
+```dotenv
+QUIETLEAF_ENABLE_WTRLAB=1
+QUIETLEAF_WTRLAB_ACCESS_AUTHORIZED=1
+```
+
+The WTR-LAB adapter always spaces all upstream requests at least two seconds apart. Keep the service at one Uvicorn worker so that gate and the in-memory home cache are process-wide.
 
 The default catalog and archive paths are inside the app root. Both `archive/` and `.env` are ignored by Git, so AMP Git updates do not overwrite them. Back up `archive/` because it contains generated books, job state, and follow state.
 

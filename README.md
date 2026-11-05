@@ -129,6 +129,21 @@ The Android app sees the `novelping` provider through its existing **My content 
 
 If the website uses a different search route, set `QUIETLEAF_NOVELPING_SEARCH_PATH` to a relative path containing `{query}`. For example, `'/search?q={query}'`. If NovelPing changes to a verifiably authentic new domain, change `QUIETLEAF_NOVELPING_BASE_URL` and restart the service. The source IDs and chapter identifiers remain independent of its domain.
 
+## WTR-LAB opt-in integration
+
+The dedicated `wtr-lab` source supports search, browse shelves, metadata, full chapter lists, chapter text, covers, Android downloads, and the server archive. It uses WTR-LAB's public same-origin page and reader requests without logging in or bypassing interactive verification. All upstream requests, including signed chapter content and cover images, share a process-local limit of one request every two seconds.
+
+This integration is disabled by default and will not start from the enable flag alone. Enable it only when you have authorization for automated access and for the reading or copying you perform:
+
+```bash
+export QUIETLEAF_API_TOKEN='your-secret-token'
+export QUIETLEAF_ENABLE_WTRLAB=1
+export QUIETLEAF_WTRLAB_ACCESS_AUTHORIZED=1
+docker compose up --build -d
+```
+
+The adapter rejects page, API, and reader redirects, untrusted content and cover hosts, oversized responses, and Turnstile challenges. Covers permit only WTR-LAB's single HTTPS image-proxy handoff to the allowlisted `img.wtr-lab.com` host; further redirects remain blocked. It does not bypass authentication, CAPTCHA, paywalls, or other access controls. WTR-LAB is then exposed through Android's existing **My content service** discovery source; no separate Android provider configuration is required. A full archive can take substantial time because each reader initialization and signed-content request remains subject to the shared two-second interval.
+
 NovelBin is not preconfigured. It can use the generic adapter when you have a workable, permissible source and stable HTML. An adapter configuration does not grant rights to a novel.
 
 ## New in v0.8: Android home shelves

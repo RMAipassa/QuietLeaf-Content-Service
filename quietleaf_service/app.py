@@ -29,6 +29,7 @@ from .archive import (
 )
 from .home import HomeFeedWorker
 from .novelping import NovelPingSource
+from .wtrlab import WtrLabSource
 
 
 class BookSelection(BaseModel):
@@ -564,6 +565,11 @@ def build_from_env() -> FastAPI:
             search_path=os.getenv("QUIETLEAF_NOVELPING_SEARCH_PATH", "/search?keyword={query}"),
             image_hosts=tuple(host.strip() for host in os.getenv("QUIETLEAF_NOVELPING_IMAGE_HOSTS", "").split(",") if host.strip()),
             access_authorized=os.getenv("QUIETLEAF_NOVELPING_ACCESS_AUTHORIZED", "").lower() in {"1", "true", "yes"},
+        ))
+    if os.getenv("QUIETLEAF_ENABLE_WTRLAB", "").lower() in {"1", "true", "yes"}:
+        sources.append(WtrLabSource(
+            base_url=os.getenv("QUIETLEAF_WTRLAB_BASE_URL", "https://wtr-lab.com"),
+            access_authorized=os.getenv("QUIETLEAF_WTRLAB_ACCESS_AUTHORIZED", "").lower() in {"1", "true", "yes"},
         ))
     archive_dir = Path(os.getenv("QUIETLEAF_ARCHIVE_DIR", str(Path(__file__).resolve().parent.parent / "archive")))
     archive_cap = int(os.getenv("QUIETLEAF_ARCHIVE_MAX_BYTES", str(2 * 1024 * 1024 * 1024)))

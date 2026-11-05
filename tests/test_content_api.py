@@ -229,7 +229,8 @@ def test_build_from_env_loads_working_directory_dotenv(tmp_path, monkeypatch):
     )
     for name in ("QUIETLEAF_API_TOKEN", "QUIETLEAF_ADMIN_PASSWORD", "QUIETLEAF_CATALOG_DIR",
                   "QUIETLEAF_ARCHIVE_DIR", "QUIETLEAF_ARCHIVE_CONCURRENCY",
-                  "QUIETLEAF_ENABLE_NOVELPING"):
+                  "QUIETLEAF_ENABLE_NOVELPING", "QUIETLEAF_ENABLE_WTRLAB",
+                  "QUIETLEAF_WTRLAB_ACCESS_AUTHORIZED", "QUIETLEAF_WTRLAB_BASE_URL"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.chdir(tmp_path)
 
