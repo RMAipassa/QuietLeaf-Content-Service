@@ -22,6 +22,7 @@ MAX_CHAPTERS = 10_000
 GLOSSARY_KEY = bytes.fromhex("16c3e08f3a5fbccd2742b7393ab3c10fe764b06199fa570195d70f5d2a0e84f1")
 GLOSSARY_MARKER = re.compile(r"»([A-Za-z0-9_-]{1,64})⛬")
 CHAPTER_ID = re.compile(r"chapter-([1-9][0-9]*)")
+BOOK_ID_QUERY = re.compile(r"(?:#|id:\s*)?([0-9]+)", re.I)
 GENRES = {
     number: label.replace("-", " ").title()
     for number, label in enumerate((
@@ -34,6 +35,10 @@ GENRES = {
         "yaoi", "yuri",
     ), start=1)
 }
+
+
+class WtrLabBookNotFound(SourceError):
+    pass
 
 
 class WtrLabSource(HtmlSource):
@@ -115,6 +120,8 @@ class WtrLabSource(HtmlSource):
             raise SourceError("WTR-LAB requires interactive verification; QuietLeaf will not bypass it")
         if payload.get("success") is False:
             message = payload.get("error")
+            if message == "Novel not found":
+                raise WtrLabBookNotFound("WTR-LAB book was not found")
             raise SourceError(message if isinstance(message, str) and message else "WTR-LAB rejected the request")
         return payload
 
@@ -159,8 +166,10 @@ class WtrLabSource(HtmlSource):
             return cached
         payload = self._json("POST", "/api/novel/get-by-raw-id", {"raw_id": int(book_id)})
         novel = payload.get("novel")
-        if not isinstance(novel, dict) or str(novel.get("raw_id")) != book_id:
-            raise SourceError("WTR-LAB book was not found")
+        if not isinstance(novel, dict):
+            raise SourceError("WTR-LAB returned invalid book metadata")
+        if str(novel.get("raw_id")) != book_id:
+            raise SourceError("WTR-LAB returned mismatched book metadata")
         slug = novel.get("slug")
         self._remember_slug(book_id, slug)
         with self._slug_lock:
@@ -232,6 +241,17 @@ class WtrLabSource(HtmlSource):
         text = query.strip()[:128]
         if not text:
             return self.recent()
+        id_query = BOOK_ID_QUERY.fullmatch(text)
+        if id_query:
+            book_id = str(int(id_query.group(1)))
+            if book_id == "0":
+                return []
+            try:
+                book = self.details(book_id)
+            except WtrLabBookNotFound:
+                return []
+            topic = genre.strip().casefold()
+            return [book] if not topic or topic in book["genre"].casefold() else []
         if sum(2 if "\u4e00" <= char <= "\u9fff" else 1 for char in text) < 3:
             return []
         payload = self._json("POST", "/api/search", {"text": text})
