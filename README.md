@@ -133,6 +133,8 @@ If the website uses a different search route, set `QUIETLEAF_NOVELPING_SEARCH_PA
 
 The dedicated `wtr-lab` source supports search, browse shelves, metadata, full chapter lists, chapter text, covers, Android downloads, and the server archive. It uses WTR-LAB's public same-origin page and reader requests without logging in or bypassing interactive verification. All upstream requests, including signed chapter content and cover images, share a process-local limit of one request every two seconds.
 
+WTR-LAB's `%{visible name|alternate-name metadata}` title annotations are displayed as their visible names in book and chapter titles. This also applies when serving previously saved server archives, even with the live adapter disabled. Refresh the Android home shelves or book details to replace old cached titles.
+
 This integration is disabled by default and will not start from the enable flag alone. Enable it only when you have authorization for automated access and for the reading or copying you perform:
 
 ```bash

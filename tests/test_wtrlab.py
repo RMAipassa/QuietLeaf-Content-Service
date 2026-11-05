@@ -8,6 +8,8 @@ from fastapi.testclient import TestClient
 
 from quietleaf_service.adapters import SourceError
 from quietleaf_service.app import build_from_env, make_app
+from quietleaf_service.archive import ArchiveStore
+from quietleaf_service.metadata import display_title
 from quietleaf_service import wtrlab
 from quietleaf_service.wtrlab import GLOSSARY_KEY, WtrLabSource
 
@@ -115,6 +117,63 @@ def test_search_recent_details_and_numeric_stable_ids():
     assert details["chapterCount"] == 3
     with pytest.raises(SourceError, match="identifier"):
         direct.details("not-numeric")
+
+
+@pytest.mark.parametrize(("title", "expected"), [
+    ("%{Soul Land|RG91bHVvIERhbHU}: I Adopted Qian Renxue", "Soul Land: I Adopted Qian Renxue"),
+    ("%{Soul Land|RG91bHVvIERhbHU} and %{Soul Land|RG91bHVv}", "Soul Land and Soul Land"),
+    ("Chapter 1: %{千仞雪|UWlhbiBSZW54dWU=}", "Chapter 1: 千仞雪"),
+    ("%{Visible Name|not valid base64!}", "Visible Name"),
+    ("A normal title: 100% {complete}", "A normal title: 100% {complete}"),
+    ("Unfinished %{Soul Land|RG91bHVv", "Unfinished %{Soul Land|RG91bHVv"),
+    ("%{ |metadata}", "%{ |metadata}"),
+])
+def test_wtrlab_title_annotations_keep_the_visible_name(title, expected):
+    assert display_title("wtr-lab", title) == expected
+    assert display_title("novelping", title) == title
+
+
+def test_annotated_titles_are_clean_in_all_live_metadata_paths(monkeypatch):
+    title = "%{Soul Land|RG91bHVvIERhbHU}: I Adopted Qian Renxue"
+    monkeypatch.setitem(RECORD["data"], "title", title)
+
+    def responder(request):
+        response = routes(request)
+        if request.url.path == f"/api/chapters/{BOOK_ID}":
+            payload = response.json()
+            payload["chapters"][1]["title"] = "Chapter 1: %{Soul Land|RG91bHVvIERhbHU}"
+            return httpx.Response(200, json=payload)
+        return response
+
+    adapter = source(responder)
+    expected = "Soul Land: I Adopted Qian Renxue"
+    assert adapter.search("test novel")[0]["title"] == expected
+    assert adapter.recent()[0]["title"] == expected
+    assert adapter.details(BOOK_ID)["title"] == expected
+    assert adapter.chapters(BOOK_ID)[0]["title"] == "Chapter 1: Soul Land"
+    adapter.refresh_home_feed()
+    assert all(items[0]["title"] == expected for items in adapter.home_feed().values())
+
+
+def test_existing_wtrlab_archives_display_clean_titles_without_the_adapter(tmp_path):
+    title = "%{Soul Land|RG91bHVvIERhbHU}: I Adopted Qian Renxue"
+    store = ArchiveStore(tmp_path)
+    for provider in ("wtr-lab", "novelping"):
+        store.save_book(provider, {"id": BOOK_ID, "title": title})
+        store.save_chapters(provider, BOOK_ID, [{"id": "chapter-1", "title": title, "ordinal": 0}])
+        store.save_text(provider, BOOK_ID, "chapter-1", "Original stored chapter text.")
+
+    with TestClient(make_app([], "local-token", tmp_path)) as api:
+        headers = {"Authorization": "Bearer local-token"}
+        base = f"/v1/books/wtr-lab/{BOOK_ID}"
+        assert api.get(base, headers=headers).json()["title"] == "Soul Land: I Adopted Qian Renxue"
+        chapter = api.get(base + "/chapters", headers=headers).json()["items"][0]
+        assert chapter["title"] == "Soul Land: I Adopted Qian Renxue"
+        assert chapter["id"] == "chapter-1"
+        assert api.get(base + "/chapters/chapter-1/text", headers=headers).text == "Original stored chapter text."
+        results = api.get("/v1/search", params={"source": "wtr-lab", "q": "Soul Land"}, headers=headers).json()["items"]
+        assert results[0]["title"] == "Soul Land: I Adopted Qian Renxue"
+        assert api.get(f"/v1/books/novelping/{BOOK_ID}", headers=headers).json()["title"] == title
 
 
 def test_chapters_text_glossary_and_cover():

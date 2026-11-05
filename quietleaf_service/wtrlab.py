@@ -14,6 +14,7 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from .adapters import MAX_TEXT_BYTES, HtmlSource, SourceError, require_id
+from .metadata import display_title
 
 
 MAX_JSON_BYTES = 4 * 1024 * 1024
@@ -195,7 +196,7 @@ class WtrLabSource(HtmlSource):
         genres = [GENRES[number] for number in genre_ids if isinstance(number, int) and number in GENRES]
         result = {
             "id": book_id,
-            "title": title.strip(),
+            "title": display_title(self.id, title),
             "author": str(author).strip() or "Unknown",
             "description": self._plain_text(data.get("description", record.get("description", ""))),
             "coverUrl": cover_url,
@@ -298,7 +299,7 @@ class WtrLabSource(HtmlSource):
                 locked = row.get("locked") is True or row.get("is_locked") is True
                 chapters.append({
                     "id": f"chapter-{number}",
-                    "title": title.strip(),
+                    "title": display_title(self.id, title),
                     "ordinal": 0,
                     "downloadable": not locked,
                     "_number": number,

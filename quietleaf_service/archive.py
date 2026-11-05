@@ -8,6 +8,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from .adapters import MAX_TEXT_BYTES, Source, SourceError, require_id
+from .metadata import display_title
 
 
 MIN_CHECK_INTERVAL_SECONDS = 1800
@@ -127,7 +128,7 @@ class ArchiveStore:
         if not row:
             return None
         return {
-            "source": row["source"], "id": row["id"], "title": row["title"],
+            "source": row["source"], "id": row["id"], "title": display_title(row["source"], row["title"]),
             "author": row["author"], "description": row["description"],
             "coverUrl": row["cover_url"], "genre": row["genre"],
             "archived": True, "coverArchived": bool(row["cover_archived"]),
@@ -239,7 +240,7 @@ class ArchiveStore:
                                  FROM chapters WHERE source=? AND book_id=?
                                  ORDER BY ordinal, id""",
                               (require_id(source), require_id(book_id))).fetchall()
-        return [{"id": row["id"], "title": row["title"], "ordinal": row["ordinal"],
+        return [{"id": row["id"], "title": display_title(source, row["title"]), "ordinal": row["ordinal"],
                  "downloadable": bool(row["stored"]), "archived": bool(row["stored"])} for row in rows]
 
     def text(self, source: str, book_id: str, chapter_id: str) -> str | None:
