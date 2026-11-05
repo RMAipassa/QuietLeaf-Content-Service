@@ -222,7 +222,8 @@ class NovelPingSource(HtmlSource):
             page = self._page(f"/book/{book_id}")
         prefix = f"/book/{book_id}/"
         chapters = {}
-        for link in page.select('a[href*="/book/"]'):
+        # Document-level CSS selectors can exclude template descendants in SoupSieve 4.
+        for link in page.find_all("a", href=lambda value: isinstance(value, str) and "/book/" in value):
             try:
                 url = self._guard_url(link.get("href", ""))
                 path = urlsplit(url).path
