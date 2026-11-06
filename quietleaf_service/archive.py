@@ -8,6 +8,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from .adapters import MAX_TEXT_BYTES, Source, SourceError, require_id
+from .content import clean_chapter_text
 from .metadata import display_title
 
 
@@ -248,7 +249,7 @@ class ArchiveStore:
             row = db.execute("""SELECT body FROM chapters
                                  WHERE source=? AND book_id=? AND id=?""",
                              tuple(map(require_id, (source, book_id, chapter_id)))).fetchone()
-        return row["body"] if row else None
+        return clean_chapter_text(source, row["body"]) if row and row["body"] is not None else None
 
     def list_books(self, query: str = "", source: str = "", limit: int = 200) -> list[dict]:
         params = []

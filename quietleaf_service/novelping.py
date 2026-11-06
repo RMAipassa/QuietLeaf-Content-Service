@@ -8,6 +8,7 @@ from urllib.parse import quote, urlsplit
 from bs4 import BeautifulSoup
 
 from .adapters import HtmlSource, SourceError, require_id
+from .content import clean_chapter_text
 
 MAX_CHAPTER_INDEX_BYTES = 8 * 1024 * 1024
 
@@ -271,5 +272,7 @@ class NovelPingSource(HtmlSource):
             if len(text) < 80:
                 text = node.get_text("\n", strip=True)
             if len(text) >= 80:
-                return text
+                cleaned = clean_chapter_text(self.id, text)
+                if cleaned.strip():
+                    return cleaned
         raise SourceError("Chapter text container was not found or was empty")

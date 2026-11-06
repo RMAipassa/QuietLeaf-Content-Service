@@ -135,6 +135,8 @@ The dedicated `wtr-lab` source supports search, browse shelves, metadata, full c
 
 WTR-LAB's `%{visible name|alternate-name metadata}` title annotations are displayed as their visible names in book and chapter titles. This also applies when serving previously saved server archives, even with the live adapter disabled. Refresh the Android home shelves or book details to replace old cached titles.
 
+Recognized source promotional sentences (for example, “Hosted on NovelPing” or “Source is WTR-LAB”) are removed from chapter text for the matching provider. Cleanup applies to new source responses and previously stored server chapters when served, without rewriting the archive. Ordinary story prose and dialogue are preserved. Android v0.9.1 also applies the cleanup while reading old phone-local downloads.
+
 To find a WTR-LAB novel by ID, select **WTR-LAB** in Android's Discover screen and enter the number from its `/en/novel/{id}/...` URL in the existing search box. Plain IDs such as `113119`, `#113119`, and `id:113119` resolve the exact novel; one- and two-digit IDs also work. Genre filters still apply. An unknown ID returns no matches, while ordinary text continues to use title search. This requires content service v0.9.3 or newer and no additional APK update.
 
 This integration is disabled by default and will not start from the enable flag alone. Enable it only when you have authorization for automated access and for the reading or copying you perform:

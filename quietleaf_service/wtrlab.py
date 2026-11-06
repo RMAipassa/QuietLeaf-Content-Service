@@ -14,6 +14,7 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from .adapters import MAX_TEXT_BYTES, HtmlSource, SourceError, require_id
+from .content import clean_chapter_text
 from .metadata import display_title
 
 
@@ -399,7 +400,7 @@ class WtrLabSource(HtmlSource):
             value = self._plain_text(hydrated)
             if value:
                 paragraphs.append(value)
-        text = "\n\n".join(paragraphs)
+        text = clean_chapter_text(self.id, "\n\n".join(paragraphs))
         if not text:
             raise SourceError("WTR-LAB returned empty chapter text")
         if len(text.encode("utf-8")) > MAX_TEXT_BYTES:

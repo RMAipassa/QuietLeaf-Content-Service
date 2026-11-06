@@ -157,6 +157,17 @@ def test_novelping_text_removes_scripts_and_preserves_paragraphs():
     assert "steal_the_reader" not in text
 
 
+def test_novelping_strips_promotional_sentences_from_chapter_prose():
+    story = "This is an original story paragraph about a traveler returning home through a quiet village."
+
+    def respond(request):
+        if request.url.path == "/book/test-novel/chapter-1-hello":
+            return httpx.Response(200, text=f'<div class="chapter-content"><p>{story} Hosted on NovelPing. The door opened.</p><p>Source is NovelPing.</p></div>')
+        return routes(request)
+
+    assert source(respond).text(BOOK, "chapter-1-hello") == story + " The door opened."
+
+
 def test_novelping_rejects_untrusted_host_and_invalid_chapters():
     adapter = source(routes)
     with pytest.raises(SourceError):

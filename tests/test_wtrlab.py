@@ -241,6 +241,18 @@ def test_chapters_text_glossary_and_cover():
     assert adapter.cover_image(RECORD["data"]["image"]) == ("image/jpeg", b"\xff\xd8\xfffixture")
 
 
+def test_wtrlab_filters_its_own_notices_after_glossary_hydration():
+    def respond(request):
+        response = routes(request)
+        if request.url.path == "/api/v2/reader/content":
+            payload = response.json()
+            payload["data"]["data"]["body"].insert(0, "This chapter is hosted on WTR-LAB.")
+            return httpx.Response(200, json=payload)
+        return response
+
+    assert source(respond).text(BOOK_ID, "chapter-1") == "The translated term appeared.\n\nSecond paragraph."
+
+
 def test_encrypted_glossary_fallback():
     nonce = bytes(range(12))
     ciphertext = AESGCM(GLOSSARY_KEY).encrypt(nonce, "decrypted term".encode(), None)
