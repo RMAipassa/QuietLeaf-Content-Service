@@ -21,6 +21,9 @@
   const privateFilter = byId("private-filter");
   const privateUploadForm = byId("private-upload-form");
   const privateUploadStatus = byId("private-upload-status");
+  const rearchiveSelected = byId("rearchive-selected");
+  const selectedArchives = new Set();
+  let queueingRefresh = false;
 
   let authenticated = false;
   let timer = null;
@@ -48,6 +51,8 @@
 
   function lock(message = "") {
     authenticated = false;
+    selectedArchives.clear();
+    updateRefreshSelection();
     state = { health: null, configuration: null, books: [], booksTotal: 0, jobs: [], follows: [] };
     configurationDirty = false;
     window.clearInterval(timer);
@@ -115,7 +120,13 @@
   }
 
   function latestJob(source, bookId) {
-    return state.jobs.find((job) => job.source === source && job.book_id === bookId);
+    const jobs = state.jobs.filter((job) => job.source === source && job.book_id === bookId);
+    return jobs.find((job) => ["queued", "running", "paused"].includes(job.status)) || jobs[0];
+  }
+
+  function updateRefreshSelection() {
+    rearchiveSelected.textContent = `Re-archive selected (${selectedArchives.size})`;
+    rearchiveSelected.disabled = queueingRefresh || !selectedArchives.size;
   }
 
   function renderSummary() {
@@ -177,7 +188,7 @@
       copy.append(node("h3", "", book.title), node("p", "", `${book.author || "Unknown author"} | ${book.source}`));
       const job = latestJob(book.source, book.id);
       const follow = state.follows.find((item) => item.source === book.source && item.book_id === book.id);
-      const progress = job && job.total ? `${job.downloaded} / ${job.total} chapters archived` : "Archived metadata available";
+      const progress = job && job.total ? `${job.downloaded} / ${job.total} chapters ${job.refresh ? "re-archived" : "archived"}` : "Archived metadata available";
       copy.append(node("p", "metadata", progress));
 
       const actions = node("div", "book-actions");
@@ -185,13 +196,40 @@
         job?.status || (follow?.enabled ? "following" : "saved"));
       const remove = node("button", "danger-button", "Delete");
       const active = job && ["queued", "running", "paused"].includes(job.status);
+      const available = book.source !== "private" && state.health.sources.some((source) => source.id === book.source);
+      const eligible = available && !active;
+      const key = `${book.source}/${book.id}`;
+      if (!eligible) selectedArchives.delete(key);
+      const selection = node("label", "archive-selection");
+      const checkbox = node("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = selectedArchives.has(key);
+      checkbox.disabled = !eligible || queueingRefresh;
+      checkbox.setAttribute("aria-label", `Select ${book.title} for re-archiving`);
+      checkbox.addEventListener("change", () => {
+        if (checkbox.checked && selectedArchives.size >= 50) {
+          checkbox.checked = false;
+          showNotice("Select up to 50 novels per re-archive batch.");
+          return;
+        }
+        if (checkbox.checked) selectedArchives.add(key); else selectedArchives.delete(key);
+        updateRefreshSelection();
+      });
+      selection.append(checkbox, node("span", "", "Select to re-archive"));
+      copy.prepend(selection);
+      const rearchive = node("button", "secondary-button", "Re-archive saved chapters");
+      rearchive.type = "button";
+      rearchive.disabled = !eligible || queueingRefresh;
+      rearchive.title = !available ? "Enable this source adapter to fetch fresh chapters." : active ? "An archive job is already active for this novel." : "Fetch each saved chapter again using the current extractor.";
+      rearchive.addEventListener("click", () => queueRearchive([{ source: book.source, bookId: book.id }]));
       remove.disabled = Boolean(active);
       remove.title = active ? "Finish or cancel the archive job before deleting this novel." : "Delete this server archive";
       remove.addEventListener("click", () => deleteBook(book));
-      actions.append(badge, remove);
+      actions.append(badge, rearchive, remove);
       card.append(copy, actions);
       return card;
     }));
+    updateRefreshSelection();
   }
 
   function renderJobs() {
@@ -204,12 +242,21 @@
       const row = node("div", "compact-row");
       const copy = node("div");
       copy.append(node("strong", "", titleFor(job.source, job.book_id)));
-      const progress = job.total ? `${job.downloaded} / ${job.total} chapters` : "Waiting for chapter list";
+      const progress = job.total ? `${job.downloaded} / ${job.total} chapters ${job.refresh ? "re-archived" : "archived"}` : "Waiting for chapter list";
       copy.append(node("small", "", `${progress} | updated ${formatTime(job.updated_at)}`));
       if (job.error) copy.append(node("small", "", job.error));
       const actions = node("div", "row-actions");
       const badge = node("span", `badge ${job.status === "failed" ? "failed" : ["queued", "running"].includes(job.status) ? "active" : ""}`, job.status);
       actions.append(badge);
+      const controls = job.status === "paused" ? [["resume", "Resume"], ["cancel", "Cancel"]]
+        : job.status === "failed" ? [["retry", "Retry"], ["cancel", "Cancel"]]
+        : ["queued", "running"].includes(job.status) ? [["pause", "Pause"], ["cancel", "Cancel"]] : [];
+      for (const [action, label] of controls) {
+        const button = node("button", "secondary-button", label);
+        button.type = "button";
+        button.addEventListener("click", () => controlJob(job, action, button));
+        actions.append(button);
+      }
       const archived = state.books.some((book) => book.source === job.source && book.id === job.book_id);
       if (!archived && ["failed", "canceled", "completed"].includes(job.status)) {
         const clear = node("button", "secondary-button", "Clear");
@@ -306,6 +353,39 @@
       showNotice(`Could not delete the novel: ${error.message}`);
     }
   }
+
+  async function queueRearchive(items) {
+    if (queueingRefresh) return;
+    queueingRefresh = true;
+    updateRefreshSelection();
+    try {
+      if (items.length === 1) {
+        await api(`/v1/archive/${encodeURIComponent(items[0].source)}/${encodeURIComponent(items[0].bookId)}/refresh`, { method: "POST" });
+      } else {
+        await api("/v1/archive/refresh", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ items }) });
+      }
+      selectedArchives.clear();
+      await refresh();
+      showNotice(`Queued re-archiving for ${items.length} novel(s). Saved chapters remain readable while fresh text is fetched. Monitor progress below; source rate limits apply.`);
+    } catch (error) { showNotice(`Could not start re-archiving: ${error.message}`); }
+    finally { queueingRefresh = false; renderBooks(); updateRefreshSelection(); }
+  }
+
+  async function controlJob(job, action, button) {
+    button.disabled = true;
+    try {
+      await api(`/v1/archive/jobs/${encodeURIComponent(job.id)}/${action}`, { method: "POST" });
+      await refresh();
+    } catch (error) { showNotice(error.message); button.disabled = false; }
+  }
+
+  rearchiveSelected.addEventListener("click", () => {
+    const items = Array.from(selectedArchives).map((key) => {
+      const [source, bookId] = key.split("/");
+      return { source, bookId };
+    });
+    if (items.length) queueRearchive(items);
+  });
 
   async function stopFollowing(follow, button) {
     button.disabled = true;

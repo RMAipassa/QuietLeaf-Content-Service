@@ -1,0 +1,106 @@
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
+
+class Element {
+  constructor(tag) {
+    this.tagName = tag.toUpperCase();
+    this.children = [];
+    this.listeners = new Map();
+    this.value = "";
+    this.checked = false;
+    this.disabled = false;
+    this.classList = { toggle() {} };
+  }
+  set textContent(value) { this.text = String(value); this.children = []; }
+  get textContent() { return (this.text || "") + this.children.map((child) => child.textContent).join(" "); }
+  append(...items) { this.children.push(...items); }
+  prepend(...items) { this.children.unshift(...items); }
+  replaceChildren(...items) { this.children = items; this.text = ""; }
+  setAttribute(name, value) { this[name] = value; }
+  focus() {}
+  addEventListener(type, handler) {
+    if (!this.listeners.has(type)) this.listeners.set(type, []);
+    this.listeners.get(type).push(handler);
+  }
+  async fire(type) { await Promise.all((this.listeners.get(type) || []).map((handler) => handler({ preventDefault() {}, target: this }))); }
+}
+
+function descendants(root) { return [root, ...root.children.flatMap(descendants)]; }
+function button(root, label) { return descendants(root).find((item) => item.tagName === "BUTTON" && item.textContent === label); }
+async function idle() { await new Promise((resolve) => setImmediate(resolve)); }
+
+async function consoleFixture() {
+  const html = fs.readFileSync(path.join(__dirname, "../quietleaf_service/web/index.html"), "utf8");
+  const elements = new Map([...html.matchAll(/<([a-z][\w-]*)\b[^>]*\bid="([^"]+)"/gi)].map((match) => [match[2], new Element(match[1])]));
+  const requests = [];
+  const books = [
+    { source: "novelping", id: "first", title: "First Book", author: "Writer" },
+    { source: "wtr-lab", id: "second", title: "Second Book", author: "Writer" },
+  ];
+  const jobs = [];
+  const fetch = async (url, options = {}) => {
+    const method = options.method || "GET";
+    requests.push({ url, method, headers: new Headers(options.headers || {}), body: options.body });
+    let payload;
+    if (method === "POST" && (url === "/v1/archive/refresh" || url.endsWith("/refresh"))) {
+      const items = url === "/v1/archive/refresh" ? JSON.parse(options.body).items : [{ source: url.split("/")[3], bookId: url.split("/")[4] }];
+      const queued = items.map((item, index) => ({ id: `job-${jobs.length + index + 1}`, source: item.source, book_id: item.bookId,
+        status: "queued", refresh: true, total: 3, downloaded: 0, updated_at: 1 }));
+      jobs.unshift(...queued);
+      payload = url === "/v1/archive/refresh" ? { items: queued, queued: queued.length } : queued[0];
+    } else if (method === "POST" && url.endsWith("/pause")) {
+      const job = jobs.find((item) => item.id === url.split("/")[4]);
+      job.status = "paused";
+      payload = job;
+    } else {
+      payload = {
+        "/v1/health": { service: "quietleaf-content-api", version: 1, releaseVersion: "0.11.0", archiveWorkerRunning: true,
+          archiveConcurrency: 3, activeArchiveJobs: 0, archiveEnabled: true, privateLibraryEnabled: false,
+          sources: [{ id: "novelping", name: "NovelPing" }, { id: "wtr-lab", name: "WTR-LAB" }] },
+        "/v1/archive/config": { archiveConcurrency: 3, followIntervalSeconds: 3600, activeIntervalSeconds: 1800 },
+        "/v1/archive/books": { items: books, total: books.length },
+        "/v1/archive/jobs": { items: jobs },
+        "/v1/archive/follows": { items: [] },
+      }[url];
+    }
+    assert.notEqual(payload, undefined, `Unexpected request ${method} ${url}`);
+    return { ok: true, status: method === "POST" ? 202 : 200, json: async () => payload };
+  };
+  const document = { getElementById: (id) => elements.get(id), createElement: (tag) => new Element(tag) };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../quietleaf_service/web/admin.js"), "utf8"), {
+    document, fetch, Headers, URLSearchParams,
+    window: { setInterval: () => 1, clearInterval() {}, setTimeout: () => 1, clearTimeout() {}, confirm: () => true },
+  });
+  await idle();
+  return { elements, requests, jobs };
+}
+
+test("a novel's re-archive button queues a refresh and exposes progress and pause controls", async () => {
+  const { elements, requests } = await consoleFixture();
+  await button(elements.get("book-list"), "Re-archive saved chapters").fire("click");
+  assert.match(elements.get("book-list").textContent, /0 \/ 3 chapters re-archived/);
+  const queued = requests.find((item) => item.method === "POST");
+  assert.equal(queued.url, "/v1/archive/novelping/first/refresh");
+  assert.equal(queued.headers.get("X-QuietLeaf-Admin"), "1");
+  await button(elements.get("job-list"), "Pause").fire("click");
+  assert.match(elements.get("job-list").textContent, /paused/);
+  assert.ok(button(elements.get("job-list"), "Resume"));
+});
+
+test("selected novels use the batch refresh endpoint and clear their selection", async () => {
+  const { elements, requests } = await consoleFixture();
+  const checkboxes = descendants(elements.get("book-list")).filter((item) => item.tagName === "INPUT" && item.type === "checkbox");
+  assert.equal(checkboxes.length, 2);
+  for (const checkbox of checkboxes) { checkbox.checked = true; await checkbox.fire("change"); }
+  assert.equal(elements.get("rearchive-selected").textContent, "Re-archive selected (2)");
+  await elements.get("rearchive-selected").fire("click");
+  await idle();
+  const queued = requests.find((item) => item.method === "POST");
+  assert.equal(queued.url, "/v1/archive/refresh");
+  assert.deepEqual(JSON.parse(queued.body), { items: [{ source: "novelping", bookId: "first" }, { source: "wtr-lab", bookId: "second" }] });
+  assert.equal(elements.get("rearchive-selected").textContent, "Re-archive selected (0)");
+  assert.equal(elements.get("rearchive-selected").disabled, true);
+});

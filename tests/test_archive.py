@@ -188,9 +188,11 @@ def test_existing_job_table_is_migrated_for_execution_leases(tmp_path):
     store = ArchiveStore(tmp_path)
 
     assert store.job("old-job")["status"] == "queued"
+    assert store.job("old-job")["refresh"] is False
     with store._connect() as db:
         columns = {row["name"] for row in db.execute("PRAGMA table_info(jobs)").fetchall()}
     assert "run_token" in columns
+    assert "refresh" in columns
 
 
 def test_deletion_and_storage_limit(tmp_path):

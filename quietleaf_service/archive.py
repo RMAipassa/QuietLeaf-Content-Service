@@ -59,9 +59,16 @@ class ArchiveStore:
                     id TEXT PRIMARY KEY, source TEXT NOT NULL, book_id TEXT NOT NULL,
                     status TEXT NOT NULL, total INTEGER NOT NULL DEFAULT 0,
                     downloaded INTEGER NOT NULL DEFAULT 0,
+                    refresh INTEGER NOT NULL DEFAULT 0,
                     error TEXT NOT NULL DEFAULT '',
                     run_token TEXT NOT NULL DEFAULT '',
                     created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS refresh_chapters (
+                    job_id TEXT NOT NULL, chapter_id TEXT NOT NULL,
+                    refreshed INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY(job_id, chapter_id),
+                    FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
                 );
                 CREATE TABLE IF NOT EXISTS follows (
                     source TEXT NOT NULL, book_id TEXT NOT NULL,
@@ -84,6 +91,8 @@ class ArchiveStore:
             job_columns = {row["name"] for row in db.execute("PRAGMA table_info(jobs)").fetchall()}
             if "run_token" not in job_columns:
                 db.execute("ALTER TABLE jobs ADD COLUMN run_token TEXT NOT NULL DEFAULT ''")
+            if "refresh" not in job_columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN refresh INTEGER NOT NULL DEFAULT 0")
             db.execute("UPDATE jobs SET status='queued',run_token='' WHERE status='running'")
             defaults = {
                 "archive_concurrency": self.archive_concurrency,
@@ -141,6 +150,7 @@ class ArchiveStore:
             return None
         result = dict(row)
         result.pop("run_token", None)
+        result["refresh"] = bool(result.get("refresh", 0))
         return result
 
     def save_book(self, source: str, book: dict):
@@ -415,20 +425,50 @@ class ArchiveStore:
                           last_error=?,failure_count=?,next_check_at=? WHERE source=? AND book_id=?""",
                        (stamp, error, stamp, error[:300], failures, stamp + interval, source, book_id))
 
-    def enqueue(self, source: str, book_id: str) -> dict:
-        source, book_id = require_id(source), require_id(book_id)
+    def _enqueue(self, db, source: str, book_id: str, refresh: bool) -> dict:
+        row = db.execute("""SELECT * FROM jobs WHERE source=? AND book_id=?
+                            AND status IN ('queued','running','paused') ORDER BY created_at DESC LIMIT 1""",
+                         (source, book_id)).fetchone()
+        if row:
+            if refresh and not row["refresh"]:
+                raise SourceError("Finish or cancel the active archive job before re-archiving this novel")
+            return self._job_row(row)
+        total = 0
+        if refresh:
+            total = db.execute("""SELECT COUNT(*) FROM chapters WHERE source=? AND book_id=? AND body IS NOT NULL""",
+                               (source, book_id)).fetchone()[0]
+            if not total:
+                raise SourceError("This novel has no saved chapters to re-archive")
+        stamp = int(time.time())
+        job_id = uuid4().hex
+        db.execute("""INSERT INTO jobs(id,source,book_id,status,refresh,total,created_at,updated_at)
+                      VALUES(?,?,?,'queued',?,?,?,?)""", (job_id, source, book_id, int(refresh), total, stamp, stamp))
+        if refresh:
+            db.execute("""INSERT INTO refresh_chapters(job_id,chapter_id)
+                          SELECT ?,id FROM chapters WHERE source=? AND book_id=? AND body IS NOT NULL""",
+                       (job_id, source, book_id))
+        return self._job_row(db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
+
+    def enqueue(self, source: str, book_id: str, refresh: bool = False) -> dict:
         with self.lock, self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute("""SELECT * FROM jobs WHERE source=? AND book_id=?
-                                AND status IN ('queued','running','paused') ORDER BY created_at DESC LIMIT 1""",
-                             (source, book_id)).fetchone()
-            if row:
-                return self._job_row(row)
-            stamp = int(time.time())
-            job_id = uuid4().hex
-            db.execute("""INSERT INTO jobs(id,source,book_id,status,created_at,updated_at)
-                          VALUES(?,?,?,'queued',?,?)""", (job_id, source, book_id, stamp, stamp))
-        return self.job(job_id)
+            return self._enqueue(db, require_id(source), require_id(book_id), refresh)
+
+    def enqueue_refresh_batch(self, items: list[tuple[str, str]]) -> list[dict]:
+        if not 1 <= len(items) <= 50:
+            raise SourceError("Select between 1 and 50 novels")
+        normalized = list(dict.fromkeys((require_id(source), require_id(book_id)) for source, book_id in items))
+        with self.lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            return [self._enqueue(db, source, book_id, True) for source, book_id in normalized]
+
+    def refresh_targets(self, job_id: str) -> list[dict]:
+        with self._connect() as db:
+            rows = db.execute("""SELECT r.chapter_id AS id,r.refreshed FROM refresh_chapters r
+                                 JOIN jobs j ON j.id=r.job_id
+                                 LEFT JOIN chapters c ON c.source=j.source AND c.book_id=j.book_id AND c.id=r.chapter_id
+                                 WHERE r.job_id=? ORDER BY c.ordinal,r.chapter_id""", (require_id(job_id),)).fetchall()
+        return [dict(row) for row in rows]
 
     def job(self, job_id: str):
         with self._connect() as db:
@@ -438,7 +478,7 @@ class ArchiveStore:
     def jobs(self):
         with self._connect() as db:
             return [self._job_row(row) for row in db.execute(
-                "SELECT * FROM jobs ORDER BY created_at DESC LIMIT 100").fetchall()]
+                "SELECT * FROM jobs ORDER BY created_at DESC,rowid DESC LIMIT 100").fetchall()]
 
     def next_job(self, excluding: set[tuple[str, str]] | None = None):
         excluded = excluding or set()
@@ -520,9 +560,10 @@ class ArchiveStore:
             db.execute("BEGIN IMMEDIATE")
             if not self._running_claim(db, job_id, run_token):
                 return False
+            refreshing = bool(db.execute("SELECT refresh FROM jobs WHERE id=?", (job_id,)).fetchone()[0])
             follow = db.execute("""SELECT failure_count,last_read_at FROM follows
                                    WHERE source=? AND book_id=?""",
-                                (source, book_id)).fetchone()
+                                (source, book_id)).fetchone() if not refreshing else None
             if follow:
                 failures = min(follow["failure_count"] + 1, 8) if error else 0
                 interval = self.interval_for(follow["last_read_at"], stamp)
@@ -612,6 +653,14 @@ class ArchiveStore:
             db.execute("BEGIN IMMEDIATE")
             if not self._running_claim(db, job_id, run_token):
                 return False
+            refresh = bool(db.execute("SELECT refresh FROM jobs WHERE id=?", (job_id,)).fetchone()[0])
+            if refresh:
+                target = db.execute("SELECT refreshed FROM refresh_chapters WHERE job_id=? AND chapter_id=?",
+                                    (job_id, chapter_id)).fetchone()
+                if target is None:
+                    raise SourceError("Chapter is not part of this re-archive job")
+                if target["refreshed"]:
+                    return True
             old = db.execute("SELECT bytes FROM chapters WHERE source=? AND book_id=? AND id=?",
                              (source, book_id, chapter_id)).fetchone()
             if old is None:
@@ -623,6 +672,9 @@ class ArchiveStore:
             db.execute("""UPDATE chapters SET body=?, bytes=?, updated_at=?
                           WHERE source=? AND book_id=? AND id=?""",
                        (body, size, int(time.time()), source, book_id, chapter_id))
+            if refresh:
+                db.execute("UPDATE refresh_chapters SET refreshed=1 WHERE job_id=? AND chapter_id=?", (job_id, chapter_id))
+                downloaded = db.execute("SELECT COUNT(*) FROM refresh_chapters WHERE job_id=? AND refreshed=1", (job_id,)).fetchone()[0]
             db.execute("""UPDATE jobs SET downloaded=?,updated_at=?
                           WHERE id=? AND status='running' AND run_token=?""",
                        (downloaded, int(time.time()), require_id(job_id), run_token))
@@ -659,6 +711,9 @@ class ArchiveStore:
                                        (current["source"], current["book_id"], current["id"])).fetchone()
                 if duplicate:
                     raise SourceError("Another archive job is already active for this novel")
+            if action == "retry" and current["refresh"] and current["status"] == "completed":
+                db.execute("UPDATE refresh_chapters SET refreshed=0 WHERE job_id=?", (current["id"],))
+                db.execute("UPDATE jobs SET downloaded=0 WHERE id=?", (current["id"],))
             db.execute("UPDATE jobs SET status=?,error='',run_token='',updated_at=? WHERE id=?",
                        (target, int(time.time()), current["id"]))
             updated = db.execute("SELECT * FROM jobs WHERE id=?", (current["id"],)).fetchone()
@@ -863,18 +918,30 @@ class ArchiveWorker:
                             return
                     except Exception:
                         pass
-            candidates = [ch for ch in chapter_list if ch.get("downloadable", False)]
-            downloaded = sum(self.store.text(source_id, book_id, ch["id"]) is not None for ch in candidates)
+            available = {ch["id"]: ch for ch in chapter_list if ch.get("downloadable", False)}
+            unavailable = []
+            refreshing = bool(job.get("refresh"))
+            if refreshing:
+                targets = self.store.refresh_targets(job_id)
+                downloaded = sum(bool(target["refreshed"]) for target in targets)
+                pending = [target for target in targets if not target["refreshed"]]
+                candidates = [available[target["id"]] for target in pending if target["id"] in available]
+                unavailable = [target["id"] for target in pending if target["id"] not in available]
+                total = len(targets)
+            else:
+                candidates = list(available.values())
+                downloaded = sum(self.store.text(source_id, book_id, ch["id"]) is not None for ch in candidates)
+                total = len(candidates)
             if not self.store.update_job_if_running(
-                job_id, run_token, total=len(candidates), downloaded=downloaded
+                job_id, run_token, total=total, downloaded=downloaded
             ):
                 return
             for chapter in candidates:
                 if self.stop_signal.is_set():
                     return
-                if self.store.text(source_id, book_id, chapter["id"]) is not None:
+                if not refreshing and self.store.text(source_id, book_id, chapter["id"]) is not None:
                     continue
-                body = adapter.text(book_id, chapter["id"])
+                body = clean_chapter_text(source_id, adapter.text(book_id, chapter["id"]))
                 if self.stop_signal.is_set():
                     return
                 if not self.store.save_text_if_running(
@@ -883,6 +950,8 @@ class ArchiveWorker:
                 ):
                     return
                 downloaded += 1
+            if unavailable:
+                raise SourceError(f"{len(unavailable)} saved chapter(s) are no longer downloadable from this source (first: {unavailable[0]}). Their saved copies were retained.")
             self.store.finish_job_if_running(
                 job_id, run_token, source_id, book_id, "completed"
             )

@@ -26,6 +26,7 @@ def test_admin_shell_is_public_but_contains_no_private_data(tmp_path):
         assert "Admin password" in page.text
         assert "Operational settings" in page.text
         assert "archive-concurrency" in page.text
+        assert "rearchive-selected" in page.text
         assert "At the Lighthouse" not in page.text
         assert page.headers["cache-control"] == "no-store"
         assert "default-src 'none'" in page.headers["content-security-policy"]
@@ -37,6 +38,8 @@ def test_admin_shell_is_public_but_contains_no_private_data(tmp_path):
         assert script.status_code == 200
         assert "/v1/archive/books" in script.text
         assert "/v1/archive/config" in script.text
+        assert "/v1/archive/refresh" in script.text
+        assert "Re-archive saved chapters" in script.text
         assert "/v1/home/cache" in script.text
         assert "Authorization" not in script.text
         assert client.get("/healthz").json() == {"status": "ok"}
@@ -56,7 +59,7 @@ def test_only_exact_admin_resources_bypass_bearer_auth(tmp_path):
 
         authorized = client.get("/v1/health", headers={"Authorization": f"Bearer {TOKEN}"})
         assert authorized.status_code == 200
-        assert authorized.json()["releaseVersion"] == "0.10.2"
+        assert authorized.json()["releaseVersion"] == "0.11.0"
         assert authorized.json()["archiveWorkerRunning"] is True
         assert authorized.json()["archiveConcurrency"] == 3
         assert authorized.json()["activeArchiveJobs"] == 0

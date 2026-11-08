@@ -146,6 +146,11 @@ input:focus, select:focus { border-color: var(--leaf); box-shadow: 0 0 0 3px rgb
 .book-card p { margin: 0; color: var(--muted); font-size: 0.82rem; }
 .book-card .metadata { margin-top: 13px; color: var(--ink); }
 .book-actions { display: flex; flex-direction: column; justify-content: space-between; align-items: end; gap: 10px; }
+.archive-tools { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 18px; }
+.archive-tools p { margin: 0; font-size: 0.82rem; }
+.archive-tools button { flex-shrink: 0; }
+.archive-selection { display: inline-flex; align-items: center; gap: 8px; margin-bottom: 10px; color: var(--muted); font-size: 0.78rem; }
+.archive-selection input { width: 18px; height: 18px; padding: 0; accent-color: var(--leaf); }
 .badge { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 3px 8px; color: var(--muted); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.08em; }
 .badge.active { color: var(--leaf); border-color: rgba(185, 221, 114, 0.4); }
 .badge.failed { color: var(--red); border-color: rgba(239, 141, 130, 0.4); }
@@ -156,7 +161,7 @@ input:focus, select:focus { border-color: var(--leaf); box-shadow: 0 0 0 3px rgb
 .compact-row:first-child { border-top: 0; }
 .compact-row strong, .compact-row small { display: block; overflow-wrap: anywhere; }
 .compact-row small { color: var(--muted); margin-top: 3px; }
-.row-actions { display: flex; align-items: center; gap: 9px; }
+.row-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; justify-content: end; }
 .empty-state { color: var(--muted); padding: 28px 0 8px; }
 .notice { margin-bottom: 18px; padding: 12px 16px; border-left: 3px solid var(--amber); color: #f7dba9; background: rgba(240, 189, 104, 0.08); }
 
@@ -183,4 +188,5 @@ footer { padding: 24px 20px 40px; border-top: 1px solid var(--line); color: var(
   .search-field { width: 100%; }
   .connection #connection-label { display: none; }
   .heading-actions { flex-direction: column; }
+  .archive-tools { align-items: stretch; flex-direction: column; }
 }

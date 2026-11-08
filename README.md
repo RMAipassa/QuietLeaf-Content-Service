@@ -231,6 +231,21 @@ All batch operations are **server-only**. On Android, chapters can now be read b
 
 Use `GET /v1/archive/follows` to see scheduled and last-check status, `POST /v1/archive/activity/{source}/{book}` to prioritize a recently read book, and `DELETE /v1/archive/follows/{source}/{book}` to stop checking without deleting the archive. A book deletion clears its follow status. The schedule is **only active while the Python service runs**, is not a cloud task, and should be used with one worker process against its SQLite archive directory.
 
+## Re-archive saved chapters (v0.11)
+
+In the service console's **Saved novels** section, use **Re-archive saved chapters** on a novel, or select up to 50 novels and choose **Re-archive selected**. The service fetches each already-saved chapter again through its current source adapter. This physically replaces old flattened text with fresh extraction, including the removal of hidden website promotional spans whose wording may not be recognized by plain-text filters.
+
+- A job snapshots the chapter IDs that have saved text when it is queued. Progress counts successfully replaced chapters; newly discovered, unsaved chapters remain the responsibility of normal archiving/follow checks.
+- Existing text stays readable until its replacement is fetched, validated, and committed. Failed or oversized responses keep the previous copy. The storage quota accounts for replacement bytes rather than charging for two complete copies.
+- Pause, resume, retry, and cancel are available under **Recent jobs**. Per-chapter checkpoints survive retries and service restarts. An in-flight response cannot overwrite text after its job is paused or canceled.
+- Retries continue unfinished targets. A new re-archive action starts a fresh pass. Retrying a completed re-archive job through the API also resets its checkpoints for another pass.
+- If an archived chapter is no longer downloadable upstream, other available targets are refreshed and the job reports the remaining chapters as failed, retaining their saved copies.
+- Source request limits and access checks apply. The source adapter must be enabled. Existing follow/unfollow settings are preserved.
+
+`POST /v1/archive/{source}/{book}/refresh` queues one novel. `POST /v1/archive/refresh` accepts the same `{"items":[{"source":"novelping","bookId":"..."}]}` selection format as the normal batch endpoint; queueing is atomic and deduplicated. Active re-archive jobs are reused; an active normal archive job must finish or be canceled first. Job responses include `refresh: true` for these jobs. Private-library originals use their own upload storage and are not source re-archive targets.
+
+This operation updates the **server archive**. To replace phone-offline copies too, remove those downloads under **Manage downloads** and download them again after the server job completes. Reopen any currently displayed chapter to load the refreshed text.
+
 ## Persistent personal archive (v0.4)
 
 The content service can **keep complete chapter text, chapter order, metadata and download-job state in SQLite**. A book is queued manually; the worker fetches its available chapters one at a time using its configured source adapter. Data written before a request fails remains in the archive, and finished chapters are not fetched twice on retry. The archive survives server restarts, Docker rebuilds and a source adapter being disabled.

@@ -568,6 +568,30 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
         worker.wake()
         return job
 
+    @app.post("/v1/archive/{source_id}/{book_id}/refresh", status_code=202)
+    def refresh_archived_book(source_id: str, book_id: str):
+        storage = writable_archive()
+        if source_id == "private":
+            raise HTTPException(status_code=409, detail="Private library originals cannot be re-archived from a source")
+        source_for(source_id)
+        job = apply(storage.enqueue, source_id, book_id, True)
+        worker.wake()
+        return job
+
+    @app.post("/v1/archive/refresh", status_code=202)
+    def refresh_archived_batch(selection: ArchiveBatch):
+        storage = writable_archive()
+        normalized = list(dict.fromkeys(
+            (apply(require_id, item.source), apply(require_id, item.bookId)) for item in selection.items
+        ))
+        for source_id, _ in normalized:
+            if source_id == "private":
+                raise HTTPException(status_code=409, detail="Private library originals cannot be re-archived from a source")
+            source_for(source_id)
+        jobs = apply(storage.enqueue_refresh_batch, normalized)
+        worker.wake()
+        return {"items": jobs, "queued": len(jobs), "phoneDownload": False}
+
     @app.post("/v1/archive/batch", status_code=202)
     def batch_archive(selection: ArchiveBatch):
         storage = writable_archive()
