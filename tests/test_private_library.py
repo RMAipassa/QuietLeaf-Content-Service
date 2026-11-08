@@ -186,3 +186,14 @@ def test_rejects_encrypted_epub_content_and_xml_entity_expansion(tmp_path):
         assert response.status_code == 422 and "encrypted" in response.json()["detail"]
         assert upload(api, "bad.epub", malicious).status_code == 422
         assert api.get("/v1/private/books", headers=AUTH).json()["total"] == 0
+
+
+def test_epub_keeps_inline_emphasis_in_its_paragraph_instead_of_splitting_words(tmp_path):
+    with zipfile.ZipFile(io.BytesIO(epub())) as original:
+        entries = [(item.filename, original.read(item)) for item in original.infolist()]
+    entries = [(name, '<html><body><h1>Opening</h1><p>This <em>is</em> an <strong>owned</strong> paragraph.</p><p>Next paragraph.</p></body></html>' if name == "OPS/first.xhtml" else data)
+               for name, data in entries]
+    with TestClient(make_app([], TOKEN, tmp_path)) as api:
+        result = upload(api, "styled.epub", zip_bytes(entries)).json()["book"]
+        text = api.get(f"/v1/books/private/{result['id']}/chapters/chapter-1/text", headers=AUTH).text
+        assert text == "Opening\n\nThis is an owned paragraph.\n\nNext paragraph."

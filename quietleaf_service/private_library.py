@@ -166,7 +166,12 @@ def parse_epub(archive: zipfile.ZipFile, items: dict) -> dict:
         for line_break in page.find_all("br"):
             line_break.replace_with("\n")
         body = page.body or page
-        text = body.get_text("\n", strip=True)
+        for block in body.find_all(["p", "div", "section", "h1", "h2", "h3", "h4", "li", "blockquote", "pre"]):
+            block.append("\n\n")
+        text = body.get_text("", strip=False)
+        text = re.sub(r"[ \t\r\f\v]+", " ", text)
+        text = "\n".join(line.strip() for line in text.splitlines())
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
         if text:
             chapters.append({"title": heading.get_text(" ", strip=True) if heading else f"Chapter {len(chapters) + 1}", "text": text})
     if pages and sum(len(chapter["text"]) for chapter in chapters) <= max(1000, 100 * len(pages)):
