@@ -185,7 +185,8 @@
     list.replaceChildren(...books.map((book) => {
       const card = node("article", "book-card");
       const copy = node("div");
-      copy.append(node("h3", "", book.title), node("p", "", `${book.author || "Unknown author"} | ${book.source}`));
+      const publication = { ongoing: "Ongoing", completed: "Completed" }[book.publicationStatus];
+      copy.append(node("h3", "", book.title), node("p", "", `${book.author || "Unknown author"} | ${book.source}${publication ? ` | ${publication}` : ""}`));
       const job = latestJob(book.source, book.id);
       const follow = state.follows.find((item) => item.source === book.source && item.book_id === book.id);
       const progress = job && job.total ? `${job.downloaded} / ${job.total} chapters ${job.refresh ? "re-archived" : "archived"}` : "Archived metadata available";

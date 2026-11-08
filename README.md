@@ -231,6 +231,14 @@ All batch operations are **server-only**. On Android, chapters can now be read b
 
 Use `GET /v1/archive/follows` to see scheduled and last-check status, `POST /v1/archive/activity/{source}/{book}` to prioritize a recently read book, and `DELETE /v1/archive/follows/{source}/{book}` to stop checking without deleting the archive. A book deletion clears its follow status. The schedule is **only active while the Python service runs**, is not a cloud task, and should be used with one worker process against its SQLite archive directory.
 
+## Search capabilities and publication status (v0.12)
+
+Book metadata includes `publicationStatus`: `completed`, `ongoing`, or `unknown`. NovelPing uses its explicit status metadata/badges; WTR-LAB's verified status codes are `0` = ongoing and `1` = completed. Missing or unsupported values remain unknown. Catalog entries can supply `publicationStatus`, and HTML adapters can configure optional `publicationStatus` and `resultPublicationStatus` selectors.
+
+Status is saved in archive metadata and supplied while the source is offline. Existing archives migrate to unknown and acquire status through their next source check. `GET /v1/books/{source}/{id}?refresh=true` explicitly refreshes metadata from an enabled adapter and updates the saved metadata without re-downloading chapters. Normal reads still use the archive immediately. Source failures retain the previous saved details. Search and home responses reuse known archived status when a live card omits it.
+
+`GET /v1/health` includes `sourceCapabilities`, keyed by source ID, with `genreSearch` booleans. NovelPing and WTR-LAB do not supply search-result genres, so this capability is false rather than advertising a filter that drops valid matches. Publication status is separate from Android's user-controlled reading/library status.
+
 ## Re-archive saved chapters (v0.11)
 
 In the service console's **Saved novels** section, use **Re-archive saved chapters** on a novel, or select up to 50 novels and choose **Re-archive selected**. The service fetches each already-saved chapter again through its current source adapter. This physically replaces old flattened text with fresh extraction, including the removal of hidden website promotional spans whose wording may not be recognized by plain-text filters.

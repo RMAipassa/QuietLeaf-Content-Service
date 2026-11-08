@@ -189,6 +189,7 @@ def parse_epub(archive: zipfile.ZipFile, items: dict) -> dict:
 
 
 class PrivateLibrarySource:
+    supports_genre_search = False
     id = "private"
     name = "Private library"
 

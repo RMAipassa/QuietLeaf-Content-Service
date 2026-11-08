@@ -13,6 +13,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from .content import is_hidden_html, remove_hidden_elements
+from .metadata import publication_status
 
 ID = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
 MAX_TEXT_BYTES = 2 * 1024 * 1024
@@ -40,6 +41,8 @@ def require_id(value: str) -> str:
 
 
 class CatalogSource:
+    supports_genre_search = True
+
     def __init__(self, root: Path, source_id: str = "collection"):
         self.root = root.resolve()
         self.id = require_id(source_id)
@@ -72,6 +75,7 @@ class CatalogSource:
             "coverUrl": book.get("coverUrl", ""),
             "genre": book.get("genre", ""),
             "chapterCount": len(book.get("chapters", [])),
+            "publicationStatus": publication_status(book.get("publicationStatus")),
         }
 
     def search(self, query: str, genre: str = "") -> list[dict]:
@@ -110,6 +114,8 @@ class CatalogSource:
 
 
 class HtmlSource:
+    supports_genre_search = False
+
     def __init__(self, config: dict, client: httpx.Client | None = None):
         self.id = require_id(config["id"])
         self.name = config["name"]
@@ -256,7 +262,8 @@ class HtmlSource:
                         pass
             found.append({"id": self._stable_id(href), "title": link.get_text(" ", strip=True),
                           "author": self._node(node, s.get("resultAuthor"), "Unknown"),
-                          "description": "", "coverUrl": cover_url, "genre": ""})
+                          "description": "", "coverUrl": cover_url, "genre": "",
+                          "publicationStatus": publication_status(self._node(node, s.get("resultPublicationStatus")))})
         return found
 
     def search(self, query: str, genre: str = "") -> list[dict]:
@@ -280,7 +287,8 @@ class HtmlSource:
         return {"id": book_id, "title": self._node(html, s["title"]),
                 "author": self._node(html, s.get("author"), "Unknown"),
                 "description": self._node(html, s.get("description")),
-                "genre": self._node(html, s.get("genre")), "coverUrl": cover_url}
+                "genre": self._node(html, s.get("genre")), "coverUrl": cover_url,
+                "publicationStatus": publication_status(self._node(html, s.get("publicationStatus")))}
 
     def chapters(self, book_id: str) -> list[dict]:
         html = self._page(self.paths["book"].replace("{id}", require_id(book_id)))

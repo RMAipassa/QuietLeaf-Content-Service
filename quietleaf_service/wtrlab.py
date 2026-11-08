@@ -15,7 +15,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from .adapters import MAX_TEXT_BYTES, HtmlSource, SourceError, require_id
 from .content import clean_chapter_text, remove_hidden_elements
-from .metadata import display_title
+from .metadata import display_title, publication_status
 
 
 MAX_JSON_BYTES = 4 * 1024 * 1024
@@ -212,6 +212,8 @@ class WtrLabSource(HtmlSource):
             "description": self._plain_text(data.get("description", record.get("description", ""))),
             "coverUrl": cover_url,
             "genre": ", ".join(genres),
+            "publicationStatus": ({0: "ongoing", 1: "completed"}.get(record.get("status"), "unknown")
+                                  if type(record.get("status")) is int else publication_status(record.get("status"))),
         }
         chapter_count = record.get("chapter_count")
         if isinstance(chapter_count, int) and chapter_count >= 0:

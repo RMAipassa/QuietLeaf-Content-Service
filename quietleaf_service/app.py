@@ -32,6 +32,7 @@ from .home import HomeFeedWorker
 from .novelping import NovelPingSource
 from .wtrlab import WtrLabSource
 from .private_library import MAX_UPLOAD_BYTES, PrivateLibrarySource
+from .metadata import publication_status
 
 
 class BookSelection(BaseModel):
@@ -357,6 +358,7 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
             try:
                 for entry in getattr(src, operation)(*params):
                     item = {"source": src.id, **entry}
+                    item["publicationStatus"] = publication_status(item.get("publicationStatus"))
                     if archive and archive.has_cover(src.id, entry["id"]):
                         item["coverArchived"] = True
                     books.append(item)
@@ -364,13 +366,16 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
                 errors.append({"source": src.id, "message": "Source temporarily unavailable"})
         if archive:
             query = params[0] if operation == "search" and params else ""
-            found = {(item["source"], item["id"]) for item in books}
+            found = {(item["source"], item["id"]): item for item in books}
             for item in archive.list_books(query):
                 key = item["source"], item["id"]
-                if key not in found:
+                if key in found:
+                    if found[key].get("publicationStatus", "unknown") == "unknown":
+                        found[key]["publicationStatus"] = item.get("publicationStatus", "unknown")
+                else:
                     if operation != "search" or not params[1] or params[1].casefold() in item["genre"].casefold():
                         books.append(item)
-                        found.add(key)
+                        found[key] = item
         return {"items": books, "errors": errors}
 
     @app.get("/v1/health")
@@ -379,6 +384,7 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
                 "releaseVersion": __version__,
                 "archiveEnabled": archive is not None,
                 "privateLibraryEnabled": private_library is not None,
+                "sourceCapabilities": {source.id: {"genreSearch": bool(getattr(source, "supports_genre_search", True))} for source in sources},
                 "privateMaxUploadBytes": private_library.max_upload_bytes if private_library else 0,
                 "archiveWorkerRunning": bool(worker and worker.is_running()),
                 "archiveConcurrency": worker.concurrency if worker else 0,
@@ -412,6 +418,7 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
         result = {category: [] for category in categories}
         seen = {category: set() for category in categories}
         errors = []
+        archived_metadata = {(item["source"], item["id"]): item for item in archive.list_books()} if archive else {}
         for src in ([by_id[source]] if source else sources):
             capability = getattr(src, "home_feed", None)
             if not callable(capability):
@@ -435,6 +442,9 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
                         if key in seen[category] or key in pending[category]:
                             continue
                         item = {**entry, "source": src.id}
+                        item["publicationStatus"] = publication_status(item.get("publicationStatus"))
+                        if item["publicationStatus"] == "unknown":
+                            item["publicationStatus"] = archived_metadata.get(key, {}).get("publicationStatus", "unknown")
                         if archive and archive.has_cover(src.id, entry["id"]):
                             item["coverArchived"] = True
                         additions[category].append((key, item))
@@ -468,22 +478,27 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
         return result
 
     @app.get("/v1/books/{source_id}/{book_id}")
-    def book(source_id: str, book_id: str):
+    def book(source_id: str, book_id: str, refresh: bool = False):
         source_id, book_id = apply(require_id, source_id), apply(require_id, book_id)
         src = by_id.get(source_id)
         cached = archive.book(source_id, book_id) if archive else None
-        if cached:
+        if cached and not refresh:
             return cached
         if src:
             try:
                 result = {"source": source_id, **src.details(book_id)}
+                result["publicationStatus"] = publication_status(result.get("publicationStatus"))
+                if cached:
+                    archive.save_book(source_id, result)
                 if archive and archive.has_cover(source_id, book_id):
                     result["coverArchived"] = True
                 return result
             except SourceError as exc:
                 raise HTTPException(status_code=422, detail=str(exc))
             except Exception:
-                raise HTTPException(status_code=502, detail="Source offline and book not archived")
+                raise HTTPException(status_code=502, detail="Source metadata refresh failed; saved details were retained" if cached else "Source offline and book not archived")
+        if cached:
+            raise HTTPException(status_code=422, detail="Source is not configured; saved book details were retained")
         raise HTTPException(status_code=404, detail="Book not found")
 
     @app.get("/v1/books/{source_id}/{book_id}/cover")

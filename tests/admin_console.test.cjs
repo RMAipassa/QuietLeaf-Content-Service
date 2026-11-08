@@ -37,8 +37,8 @@ async function consoleFixture() {
   const elements = new Map([...html.matchAll(/<([a-z][\w-]*)\b[^>]*\bid="([^"]+)"/gi)].map((match) => [match[2], new Element(match[1])]));
   const requests = [];
   const books = [
-    { source: "novelping", id: "first", title: "First Book", author: "Writer" },
-    { source: "wtr-lab", id: "second", title: "Second Book", author: "Writer" },
+    { source: "novelping", id: "first", title: "First Book", author: "Writer", publicationStatus: "completed" },
+    { source: "wtr-lab", id: "second", title: "Second Book", author: "Writer", publicationStatus: "ongoing" },
   ];
   const jobs = [];
   const fetch = async (url, options = {}) => {
@@ -103,4 +103,10 @@ test("selected novels use the batch refresh endpoint and clear their selection",
   assert.deepEqual(JSON.parse(queued.body), { items: [{ source: "novelping", bookId: "first" }, { source: "wtr-lab", bookId: "second" }] });
   assert.equal(elements.get("rearchive-selected").textContent, "Re-archive selected (0)");
   assert.equal(elements.get("rearchive-selected").disabled, true);
+});
+
+test("publication status is shown independently from archive job progress", async () => {
+  const { elements } = await consoleFixture();
+  assert.match(elements.get("book-list").textContent, /Writer \| novelping \| Completed/);
+  assert.match(elements.get("book-list").textContent, /Writer \| wtr-lab \| Ongoing/);
 });

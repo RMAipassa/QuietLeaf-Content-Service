@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from .adapters import MAX_TEXT_BYTES, Source, SourceError, require_id
 from .content import clean_chapter_text
-from .metadata import display_title
+from .metadata import display_title, publication_status
 
 
 MIN_CHECK_INTERVAL_SECONDS = 1800
@@ -88,6 +88,9 @@ class ArchiveStore:
                 CREATE INDEX IF NOT EXISTS chapters_by_book ON chapters(source, book_id, ordinal);
                 CREATE INDEX IF NOT EXISTS jobs_by_status ON jobs(status, created_at);
             """)
+            book_columns = {row["name"] for row in db.execute("PRAGMA table_info(books)").fetchall()}
+            if "publication_status" not in book_columns:
+                db.execute("ALTER TABLE books ADD COLUMN publication_status TEXT NOT NULL DEFAULT 'unknown'")
             job_columns = {row["name"] for row in db.execute("PRAGMA table_info(jobs)").fetchall()}
             if "run_token" not in job_columns:
                 db.execute("ALTER TABLE jobs ADD COLUMN run_token TEXT NOT NULL DEFAULT ''")
@@ -142,6 +145,7 @@ class ArchiveStore:
             "author": row["author"], "description": row["description"],
             "coverUrl": row["cover_url"], "genre": row["genre"],
             "archived": True, "coverArchived": bool(row["cover_archived"]),
+            "publicationStatus": publication_status(row["publication_status"]),
         }
 
     @staticmethod
@@ -158,15 +162,15 @@ class ArchiveStore:
         book_id = require_id(book["id"])
         with self.lock, self._connect() as db:
             db.execute("""
-                INSERT INTO books(source, id, title, author, description, cover_url, genre, updated_at)
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO books(source, id, title, author, description, cover_url, genre, updated_at, publication_status)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source, id) DO UPDATE SET
                     title=excluded.title, author=excluded.author,
                     description=excluded.description, cover_url=excluded.cover_url,
-                    genre=excluded.genre, updated_at=excluded.updated_at
+                    genre=excluded.genre, updated_at=excluded.updated_at, publication_status=excluded.publication_status
             """, (source, book_id, book["title"], book.get("author", ""),
                   book.get("description", ""), book.get("coverUrl", ""),
-                  book.get("genre", ""), int(time.time())))
+                  book.get("genre", ""), int(time.time()), publication_status(book.get("publicationStatus"))))
 
     def cover(self, source: str, book_id: str) -> tuple[str, bytes] | None:
         with self._connect() as db:
@@ -595,15 +599,15 @@ class ArchiveStore:
             if not self._running_claim(db, job_id, run_token):
                 return False
             db.execute("""
-                INSERT INTO books(source, id, title, author, description, cover_url, genre, updated_at)
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO books(source, id, title, author, description, cover_url, genre, updated_at, publication_status)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source, id) DO UPDATE SET
                     title=excluded.title, author=excluded.author,
                     description=excluded.description, cover_url=excluded.cover_url,
-                    genre=excluded.genre, updated_at=excluded.updated_at
+                    genre=excluded.genre, updated_at=excluded.updated_at, publication_status=excluded.publication_status
             """, (source, book_id, book["title"], book.get("author", ""),
                   book.get("description", ""), book.get("coverUrl", ""),
-                  book.get("genre", ""), int(time.time())))
+                  book.get("genre", ""), int(time.time()), publication_status(book.get("publicationStatus"))))
             for chapter_id, title, ordinal in normalized:
                 db.execute("""
                     INSERT INTO chapters(source, book_id, id, title, ordinal)

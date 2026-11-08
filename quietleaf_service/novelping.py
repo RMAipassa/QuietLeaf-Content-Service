@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 
 from .adapters import HtmlSource, SourceError, require_id
 from .content import clean_chapter_text, is_hidden_html, remove_hidden_elements
+from .metadata import publication_status
 
 MAX_CHAPTER_INDEX_BYTES = 8 * 1024 * 1024
 
@@ -57,7 +58,7 @@ class NovelPingSource(HtmlSource):
         except SourceError:
             return None
 
-    def _book_entries(self, page: BeautifulSoup, query: str = "", genre: str = "") -> list[dict]:
+    def _book_entries(self, page: BeautifulSoup, query: str = "", genre: str = "", default_status: str = "unknown") -> list[dict]:
         result = []
         seen = set()
         needle = query.strip().casefold()
@@ -78,7 +79,7 @@ class NovelPingSource(HtmlSource):
                 title = cover.get("alt", "").strip() if cover else ""
             if not title or title.casefold() in {"read", "read now", "details", "more", "chapter list"}:
                 continue
-            wrapper = link.find_parent("div", class_="row") or link.find_parent(class_=re.compile("novel|book|item|card", re.I))
+            wrapper = link.find_parent("div", class_="row") or link.find_parent(["div", "article", "li"], class_=re.compile("novel|book|item|card", re.I))
             context = wrapper or link.parent or link
             author = self._nearby_text(context, (".author", ".byline", '[class*="author"]')) or "Unknown"
             genre_text = self._nearby_text(context, (".genre", '[class*="genre"]'))
@@ -88,6 +89,7 @@ class NovelPingSource(HtmlSource):
                 continue
             seen.add(book_id)
             cover_url = self._cover_url(context, search_result=True)
+            status = self._status(context)
             result.append({
                 "id": book_id,
                 "title": title,
@@ -95,6 +97,7 @@ class NovelPingSource(HtmlSource):
                 "description": "",
                 "coverUrl": cover_url,
                 "genre": genre_text,
+                "publicationStatus": status if status != "unknown" else default_status,
             })
             if len(result) >= 100:
                 break
@@ -163,7 +166,7 @@ class NovelPingSource(HtmlSource):
         for category, path in self.HOME_PATHS.items():
             if stop_event is not None and stop_event.is_set():
                 return
-            feed[category] = self._book_entries(self._page(path))[:20]
+            feed[category] = self._book_entries(self._page(path), default_status="completed" if category == "completed" else "unknown")[:20]
         if stop_event is not None and stop_event.is_set():
             return
         with self._home_lock:
@@ -172,9 +175,11 @@ class NovelPingSource(HtmlSource):
             self._home_cache = feed
 
     @staticmethod
-    def _field(page: BeautifulSoup, label: str) -> str:
+    def _field(page: BeautifulSoup, label: str, skip_book_titles: bool = False) -> str:
         pattern = re.compile(r"^" + re.escape(label) + r"\s*:\s*", re.I)
         for node in page.find_all(["dt", "li", "div", "span", "strong", "b", "h3", "p"]):
+            if skip_book_titles and ("novel-title" in node.get("class", []) or node.find("a", href=re.compile(r"/book/"))):
+                continue
             if node.find(["dt", "li", "div", "span", "strong", "b", "h3", "p"]):
                 continue
             value = node.get_text(" ", strip=True)
@@ -191,6 +196,14 @@ class NovelPingSource(HtmlSource):
                     if adjacent and adjacent in parent.descendants:
                         return adjacent.get_text(" ", strip=True)
         return ""
+
+    def _status(self, page) -> str:
+        meta = page.select_one('meta[property="og:novel:status"]')
+        candidates = [meta.get("content", "")] if meta else []
+        candidates.extend(node.get("data-status") or node.get_text(" ", strip=True)
+                          for node in page.select('[data-status], [class*="status"], .badge, .label'))
+        candidates.append(self._field(page, "Status", skip_book_titles=True))
+        return next((status for status in map(publication_status, candidates) if status != "unknown"), "unknown")
 
     def details(self, book_id: str) -> dict:
         page = self._page(f"/book/{require_id(book_id)}")
@@ -212,6 +225,7 @@ class NovelPingSource(HtmlSource):
             "description": description,
             "genre": ", ".join(part.strip().title() for part in genre.split(",") if part.strip()) or self._field(page, "Genre"),
             "coverUrl": self._cover_url(page),
+            "publicationStatus": self._status(page),
         }
 
     def chapters(self, book_id: str) -> list[dict]:
