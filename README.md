@@ -79,6 +79,32 @@ IDs use only letters, numbers, underscores and hyphens; they deliberately do **n
 
 Set `QUIETLEAF_CATALOG_DIR` to use a different catalog folder.
 
+## Private library (v0.10)
+
+The authenticated private library stores owned **TXT, EPUB, CBZ, and PDF** files. Upload from Android's **Private** tab or the service console's **Private library** panel. Both use the same catalog, accessible as source `private` / **Private library**. The original uploaded bytes are retained for download from the console.
+
+The library is enabled automatically when archive storage and an API token or admin password are configured. Its metadata database and immutable original files live under `QUIETLEAF_ARCHIVE_DIR/private-library/`; back up this directory with the archive. Text EPUBs are indexed in spine order, CBZ pages are naturally sorted, and image EPUBs retain spine image order. Image EPUBs additionally get an ordered CBZ offline copy. PDFs are rendered on demand. Android can read volumes from the server or keep a whole volume offline.
+
+Defaults: **100,000,000 bytes per upload**, **10 GiB total** private-library storage, and **2,000 image/PDF pages** per volume. Override `QUIETLEAF_PRIVATE_MAX_UPLOAD_BYTES` and `QUIETLEAF_PRIVATE_MAX_BYTES` if needed, taking your reverse proxy's upload limit into account. TXT files up to 32 MiB are split into reader-sized parts; each extracted EPUB text chapter must fit the existing 2 MiB chapter limit. ZIP expansion is bounded. Uploads use a streamed raw request body, not multipart or base64. Encrypted EPUB content and password-protected PDFs require an unlocked input file.
+
+```bash
+curl -X POST 'https://your-service.example/v1/private/books?filename=owned-book.epub' \
+  -H 'Authorization: Bearer YOUR_TOKEN' \
+  -H 'Content-Type: application/octet-stream' \
+  --data-binary '@owned-book.epub'
+```
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /v1/private/books?q=...&offset=0&limit=100` | Search/paginate private items |
+| `POST /v1/private/books?filename=...&title=...&author=...` | Stream an upload; optional title/author overrides |
+| `GET /v1/private/books/{id}/file` | Download the unchanged original |
+| `GET /v1/private/books/{id}/download` | Offline document (ordered CBZ for image EPUB, otherwise original) |
+| `GET /v1/private/books/{id}/pages/{zeroBasedPage}` | Authenticated JPEG page rendering |
+| `DELETE /v1/private/books/{id}` | Delete the server item and original |
+
+Private books also use the ordinary `/v1/books/private/{id}` metadata, chapter, text, and cover endpoints. Identical uploads are deduplicated by file hash. Private items are already stored on the server and do not need source-follow/archive jobs. Server deletion retains copies already downloaded to a phone.
+
 ## HTML adapters (only where permitted)
 
 The service includes a configurable `HtmlSource` using CSS selectors. It is *not* enabled by default. See `examples/authorized-html-source.example.json` for the schema.

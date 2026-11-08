@@ -101,6 +101,24 @@
         </form>
       </section>
 
+      <section class="panel" id="private-library-panel">
+        <div class="panel-heading">
+          <div><p class="eyebrow">Your own books and manga</p><h2>Private library</h2></div>
+          <label class="search-field"><span>Search</span><input id="private-filter" type="search" placeholder="Title or author"></label>
+        </div>
+        <p class="muted">Upload TXT, EPUB, CBZ, or PDF files. Originals stay on this server and are available in the app's Private Library.</p>
+        <form id="private-upload-form" class="configuration-form">
+          <div class="configuration-grid">
+            <label class="configuration-field">Files<input id="private-files" type="file" accept=".txt,.epub,.cbz,.pdf" multiple required></label>
+            <label class="configuration-field">Title (optional)<input id="private-title" maxlength="250" placeholder="Use book metadata or filename"></label>
+            <label class="configuration-field">Author (optional)<input id="private-author" maxlength="250" placeholder="Use book metadata"></label>
+          </div>
+          <div class="configuration-actions"><span id="private-upload-status" class="muted">Original files are retained.</span><button id="private-upload-button" class="primary-button" type="submit">Upload to private library</button></div>
+        </form>
+        <p id="private-result-note" class="muted"></p>
+        <div id="private-book-list" class="book-list"></div>
+      </section>
+
       <section class="panel">
         <div class="panel-heading">
           <div><p class="eyebrow">Persistent archive</p><h2>Saved novels</h2></div>

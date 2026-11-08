@@ -277,5 +277,5 @@ def test_build_from_env_loads_working_directory_dotenv(tmp_path, monkeypatch):
             "/v1/health", headers={"Authorization": "Bearer amp-file-token"}
         )
         assert health.status_code == 200
-        assert health.json()["sources"] == [{"id": "collection", "name": "AMP test"}]
+        assert health.json()["sources"] == [{"id": "collection", "name": "AMP test"}, {"id": "private", "name": "Private library"}]
         assert health.json()["archiveConcurrency"] == 2

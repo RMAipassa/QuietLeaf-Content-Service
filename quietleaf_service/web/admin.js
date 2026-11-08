@@ -18,6 +18,9 @@
   const configurationStatus = byId("configuration-status");
   const configurationSave = byId("configuration-save");
   const notice = byId("notice");
+  const privateFilter = byId("private-filter");
+  const privateUploadForm = byId("private-upload-form");
+  const privateUploadStatus = byId("private-upload-status");
 
   let authenticated = false;
   let timer = null;
@@ -250,6 +253,7 @@
     renderBooks();
     renderJobs();
     renderFollows();
+    renderPrivateBooks();
     byId("last-updated").textContent = `Updated ${new Date().toLocaleTimeString()}`;
   }
 
@@ -264,8 +268,12 @@
         api("/v1/health"), api("/v1/archive/config"), api("/v1/archive/books"),
         api("/v1/archive/jobs"), api("/v1/archive/follows"),
       ]);
+      const privateBooks = health.privateLibraryEnabled
+        ? await api(`/v1/private/books?q=${encodeURIComponent(privateFilter.value.trim())}`)
+        : { items: [], total: 0 };
       state = {
         health,
+        privateBooks,
         configuration: startedConfigurationRevision === configurationRevision
           ? configuration
           : state.configuration,
@@ -336,6 +344,87 @@
       homeCacheButton.disabled = false;
     }
   }
+
+  function renderPrivateBooks() {
+    byId("private-library-panel").hidden = !state.health?.privateLibraryEnabled;
+    const catalog = state.privateBooks || { items: [], total: 0 };
+    byId("private-result-note").textContent = `${catalog.total} private item(s); showing ${catalog.items.length}. Upload limit: ${formatBytes(state.health?.privateMaxUploadBytes)} per file.`;
+    byId("private-book-list").replaceChildren(...catalog.items.map((book) => {
+      const card = node("article", "book-card");
+      const copy = node("div");
+      copy.append(node("h3", "", book.title), node("p", "", book.author),
+        node("p", "metadata", `${book.mediaType === "text" ? `${book.chapterCount} chapters` : `${book.pageCount} pages`} | ${book.originalName} | ${formatBytes(book.originalBytes)}`));
+      const actions = node("div", "book-actions");
+      const original = node("a", "secondary-button", "Original file");
+      original.href = `/v1/private/books/${encodeURIComponent(book.id)}/file`;
+      original.download = book.originalName;
+      const remove = node("button", "danger-button", "Delete");
+      remove.type = "button";
+      remove.addEventListener("click", async () => {
+        if (!window.confirm(`Delete "${book.title}" and its original file from your private library?`)) return;
+        remove.disabled = true;
+        try {
+          await api(`/v1/private/books/${encodeURIComponent(book.id)}`, { method: "DELETE" });
+          await refresh();
+        } catch (error) { showNotice(error.message); remove.disabled = false; }
+      });
+      actions.append(original, remove);
+      card.append(copy, actions);
+      return card;
+    }));
+  }
+
+  function uploadPrivateFile(file, title, author, position, total) {
+    return new Promise((resolve, reject) => {
+      const request = new XMLHttpRequest();
+      const params = new URLSearchParams({ filename: file.name, title, author });
+      request.open("POST", `/v1/private/books?${params}`);
+      request.setRequestHeader("Content-Type", "application/octet-stream");
+      request.setRequestHeader("X-QuietLeaf-Admin", "1");
+      request.responseType = "json";
+      request.upload.onprogress = (event) => {
+        privateUploadStatus.textContent = event.lengthComputable && event.loaded < event.total
+          ? `Uploading ${position}/${total}: ${file.name} — ${Math.round(event.loaded / event.total * 100)}%`
+          : `Processing ${position}/${total}: ${file.name}...`;
+      };
+      request.onload = () => {
+        if (request.status >= 200 && request.status < 300) resolve(request.response);
+        else {
+          if (request.status === 401) lock("Your admin session expired. Sign in again.");
+          reject(new Error(request.response?.detail || `Upload failed with HTTP ${request.status}`));
+        }
+      };
+      request.onerror = () => reject(new Error("Upload connection failed. Check the service connection."));
+      request.onabort = () => reject(new Error("Upload canceled."));
+      request.send(file);
+    });
+  }
+
+  privateUploadForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const files = Array.from(byId("private-files").files || []);
+    const limit = state.health?.privateMaxUploadBytes || 100000000;
+    if (files.some((file) => !file.size || file.size > limit)) {
+      privateUploadStatus.textContent = `Choose nonempty files up to ${formatBytes(limit)} each.`;
+      return;
+    }
+    const button = byId("private-upload-button");
+    button.disabled = true;
+    try {
+      for (let index = 0; index < files.length; index++) {
+        await uploadPrivateFile(files[index], byId("private-title").value.trim(), byId("private-author").value.trim(), index + 1, files.length);
+      }
+      privateUploadForm.reset();
+      privateUploadStatus.textContent = `${files.length} file(s) saved to your private library.`;
+      await refresh();
+    } catch (error) { privateUploadStatus.textContent = error.message; }
+    finally { button.disabled = false; }
+  });
+  let privateSearchTimer;
+  privateFilter.addEventListener("input", () => {
+    window.clearTimeout(privateSearchTimer);
+    privateSearchTimer = window.setTimeout(refresh, 300);
+  });
 
   configurationForm.addEventListener("input", () => {
     configurationDirty = true;

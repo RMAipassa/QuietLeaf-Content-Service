@@ -6,6 +6,7 @@ import hmac
 import json
 import os
 import secrets
+import tempfile
 import time
 from contextlib import asynccontextmanager
 from ipaddress import ip_address
@@ -30,6 +31,7 @@ from .archive import (
 from .home import HomeFeedWorker
 from .novelping import NovelPingSource
 from .wtrlab import WtrLabSource
+from .private_library import MAX_UPLOAD_BYTES, PrivateLibrarySource
 
 
 class BookSelection(BaseModel):
@@ -62,9 +64,12 @@ MAX_TRACKED_LOGIN_ADDRESSES = 4096
 def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = None,
              archive_max_bytes: int = 2 * 1024 * 1024 * 1024,
              follow_interval: int = 3600, active_interval: int = 1800,
-             admin_password: str = "", archive_concurrency: int = 3) -> FastAPI:
+              admin_password: str = "", archive_concurrency: int = 3,
+              private_max_bytes: int = 10 * 1024 ** 3, private_max_upload_bytes: int = MAX_UPLOAD_BYTES) -> FastAPI:
     if admin_password and not 12 <= len(admin_password) <= 1024:
         raise ValueError("Admin password must contain between 12 and 1024 characters")
+    private_library = PrivateLibrarySource(archive_dir / "private-library", private_max_bytes, private_max_upload_bytes) if archive_dir and (token or admin_password) else None
+    sources = [*sources, private_library] if private_library else list(sources)
     by_id = {source.id: source for source in sources}
     if len(by_id) != len(sources):
         raise ValueError("Duplicate source identifier")
@@ -94,6 +99,8 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
     app.state.archive_worker = worker
     app.state.archive_store = archive
     app.state.home_feed_worker = home_feed_worker
+    app.state.private_library = private_library
+    upload_gate = asyncio.Semaphore(2)
     web_root = Path(__file__).with_name("web")
     app.mount("/admin/assets", StaticFiles(directory=web_root), name="admin-assets")
     effective_admin_password = admin_password or token
@@ -184,6 +191,9 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
                     request.headers.get("x-quietleaf-admin") != "1"):
                 return JSONResponse({"detail": "Admin request confirmation required"}, status_code=403)
         response = await call_next(request)
+        if request.url.path.startswith(("/v1/private/", "/v1/books/private/")):
+            response.headers["Cache-Control"] = "private, no-store"
+            response.headers["X-Content-Type-Options"] = "nosniff"
         if request.url.path in protected_response_paths:
             response.headers["Cache-Control"] = "no-store"
             response.headers["Content-Security-Policy"] = (
@@ -278,6 +288,60 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
             raise HTTPException(status_code=403, detail="Set an API token or admin password before enabling archive management")
         return archive
 
+    def private_store() -> PrivateLibrarySource:
+        if private_library is None:
+            raise HTTPException(status_code=503, detail="Private library requires archive storage and an API token or admin password")
+        return private_library
+
+    @app.get("/v1/private/books")
+    def private_books(q: str = Query(default="", max_length=100), offset: int = Query(default=0, ge=0),
+                      limit: int = Query(default=100, ge=1, le=100)):
+        return private_store().listing(q, offset, limit)
+
+    @app.post("/v1/private/books", status_code=201)
+    async def upload_private_book(request: Request, filename: str = Query(max_length=250),
+                                  title: str = Query(default="", max_length=250), author: str = Query(default="", max_length=250)):
+        store = private_store()
+        if Path(filename).suffix.lower() not in {".txt", ".epub", ".cbz", ".pdf"}:
+            raise HTTPException(status_code=422, detail="Choose a TXT, EPUB, CBZ, or PDF file")
+        try:
+            declared = int(request.headers.get("content-length", "0"))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid upload size")
+        if declared < 0 or declared > store.max_upload_bytes:
+            raise HTTPException(status_code=413, detail="The file exceeds the private upload size limit")
+        async with upload_gate:
+            with tempfile.TemporaryDirectory(prefix=".upload-", dir=store.root) as directory:
+                path = Path(directory) / "upload"
+                received = 0
+                with path.open("wb") as output:
+                    async for chunk in request.stream():
+                        received += len(chunk)
+                        if received > store.max_upload_bytes:
+                            raise HTTPException(status_code=413, detail="The file exceeds the private upload size limit")
+                        await asyncio.to_thread(output.write, chunk)
+                if not received:
+                    raise HTTPException(status_code=422, detail="The upload is empty")
+                return await asyncio.to_thread(apply, store.import_file, path, filename, title, author)
+
+    @app.get("/v1/private/books/{book_id}/file")
+    def private_original(book_id: str):
+        path, filename = apply(private_store().original, book_id)
+        return FileResponse(path, media_type="application/octet-stream", filename=filename)
+
+    @app.get("/v1/private/books/{book_id}/pages/{number}")
+    def private_page(book_id: str, number: int):
+        return Response(apply(private_store().page, book_id, number), media_type="image/jpeg")
+
+    @app.get("/v1/private/books/{book_id}/download")
+    def private_offline_document(book_id: str):
+        path, filename = apply(private_store().offline_document, book_id)
+        return FileResponse(path, media_type="application/octet-stream", filename=filename)
+
+    @app.delete("/v1/private/books/{book_id}")
+    def delete_private_book(book_id: str):
+        return {"deleted": apply(private_store().delete, book_id)}
+
     def apply(method, *args):
         try:
             return method(*args)
@@ -314,6 +378,8 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
         return {"service": "quietleaf-content-api", "version": 1,
                 "releaseVersion": __version__,
                 "archiveEnabled": archive is not None,
+                "privateLibraryEnabled": private_library is not None,
+                "privateMaxUploadBytes": private_library.max_upload_bytes if private_library else 0,
                 "archiveWorkerRunning": bool(worker and worker.is_running()),
                 "archiveConcurrency": worker.concurrency if worker else 0,
                 "activeArchiveJobs": worker.active_count() if worker else 0,
@@ -422,6 +488,8 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
 
     @app.get("/v1/books/{source_id}/{book_id}/cover")
     def archived_cover(source_id: str, book_id: str):
+        if source_id == "private" and private_library:
+            return Response(apply(private_library.cover, book_id), media_type="image/jpeg")
         if archive is None:
             raise HTTPException(status_code=404, detail="Cover unavailable")
         cover = archive.cover(apply(require_id, source_id), apply(require_id, book_id))
@@ -492,6 +560,8 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
     @app.post("/v1/archive/{source_id}/{book_id}", status_code=202)
     def archive_book(source_id: str, book_id: str):
         storage = writable_archive()
+        if source_id == "private":
+            raise HTTPException(status_code=409, detail="Private library items are already stored on this server")
         source_for(source_id)
         apply(storage.follow, source_id, book_id)
         job = apply(storage.enqueue, source_id, book_id)
@@ -506,6 +576,8 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
             for item in selection.items
         ))
         for source_id, _ in normalized:
+            if source_id == "private":
+                raise HTTPException(status_code=409, detail="Private library items are already stored on this server")
             source_for(source_id)
         jobs = []
         for source_id, book_id in normalized:
@@ -593,6 +665,8 @@ def build_from_env() -> FastAPI:
         active_interval=int(os.getenv("QUIETLEAF_ACTIVE_INTERVAL_SECONDS", "1800")),
         admin_password=os.getenv("QUIETLEAF_ADMIN_PASSWORD", ""),
         archive_concurrency=int(os.getenv("QUIETLEAF_ARCHIVE_CONCURRENCY", "3")),
+        private_max_bytes=int(os.getenv("QUIETLEAF_PRIVATE_MAX_BYTES", str(10 * 1024 ** 3))),
+        private_max_upload_bytes=int(os.getenv("QUIETLEAF_PRIVATE_MAX_UPLOAD_BYTES", str(MAX_UPLOAD_BYTES))),
     )
 
 
