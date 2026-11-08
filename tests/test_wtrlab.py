@@ -253,6 +253,18 @@ def test_wtrlab_filters_its_own_notices_after_glossary_hydration():
     assert source(respond).text(BOOK_ID, "chapter-1") == "The translated term appeared.\n\nSecond paragraph."
 
 
+def test_wtrlab_html_body_does_not_include_invisible_text():
+    def respond(request):
+        response = routes(request)
+        if request.url.path == "/api/v2/reader/content":
+            payload = response.json()
+            payload["data"]["data"]["body"].append('<p>Visible paragraph.<span style="display:none">An unknown hidden notice.</span></p>')
+            return httpx.Response(200, json=payload)
+        return response
+
+    assert source(respond).text(BOOK_ID, "chapter-1") == "The translated term appeared.\n\nSecond paragraph.\n\nVisible paragraph."
+
+
 def test_encrypted_glossary_fallback():
     nonce = bytes(range(12))
     ciphertext = AESGCM(GLOSSARY_KEY).encrypt(nonce, "decrypted term".encode(), None)

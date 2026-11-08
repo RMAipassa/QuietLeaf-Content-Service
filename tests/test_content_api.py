@@ -79,7 +79,7 @@ def test_html_adapter_fixture_and_stable_ids():
             "/robots.txt": "User-agent: *\nDisallow: /private\n",
             "/search": '<div class="book"><a class="title" href="/books/book1">Book One</a><span class="author">A. Writer</span></div>',
             "/books/book1": '<h1>Book One</h1><div class="author">A. Writer</div><div class="chapters"><a href="/books/book1/ch-1">First chapter</a><a href="/books/book1/ch-2">Second</a><a href="/books/book1/ch-2">Second again</a></div>',
-            "/books/book1/ch-1": "<article><p>Original paragraph.</p><script>junk</script></article>"
+            "/books/book1/ch-1": "<article hidden><p>A hidden alternative chapter must not be selected.</p></article><article><p>Original paragraph.</p><script>junk</script><span style='display:none'>Unknown invisible notice.</span><p hidden>Hidden text.</p></article>"
         }
         return httpx.Response(200 if request.url.path in paths else 404, text=paths.get(request.url.path, ""))
     source = make_html_adapter(respond)

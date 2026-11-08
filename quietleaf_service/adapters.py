@@ -12,6 +12,8 @@ from urllib.robotparser import RobotFileParser
 import httpx
 from bs4 import BeautifulSoup
 
+from .content import is_hidden_html, remove_hidden_elements
+
 ID = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
 MAX_TEXT_BYTES = 2 * 1024 * 1024
 
@@ -298,9 +300,11 @@ class HtmlSource:
     def text(self, book_id: str, chapter_id: str) -> str:
         require_id(book_id)
         html = self._page(self.paths["chapter"].replace("{id}", require_id(book_id)).replace("{chapter}", require_id(chapter_id)))
-        content = html.select_one(self.selectors["chapterBody"])
+        content = next((node for node in html.select(self.selectors["chapterBody"])
+                        if not is_hidden_html(node) and not any(is_hidden_html(parent) for parent in node.parents)), None)
         if content is None:
             raise SourceError("Chapter structure changed")
         for el in content.select("script,style,noscript,iframe"):
             el.decompose()
+        remove_hidden_elements(content)
         return content.get_text("\n", strip=True)

@@ -168,6 +168,19 @@ def test_novelping_strips_promotional_sentences_from_chapter_prose():
     assert source(respond).text(BOOK, "chapter-1-hello") == story + " The door opened."
 
 
+def test_novelping_does_not_extract_invisible_notices_or_hidden_chapter_containers():
+    story = "This original test paragraph describes a traveller crossing a quiet village and returning home after a long journey."
+
+    def respond(request):
+        if request.url.path == "/book/test-novel/chapter-1-hello":
+            return httpx.Response(200, text=f'''<div class="chapter-content" hidden><p>Hidden chapter text that must not be used. {story}</p></div>
+                <div class="chapter-content"><p>{story}<span style="display:none">A completely new hidden promotional phrase.</span> The door opened.</p>
+                <p hidden>Another unknown hidden notice.</p><p style="visibility:hidden">Invisible text.</p></div>''')
+        return routes(request)
+
+    assert source(respond).text(BOOK, "chapter-1-hello") == story + " The door opened."
+
+
 def test_novelping_rejects_untrusted_host_and_invalid_chapters():
     adapter = source(routes)
     with pytest.raises(SourceError):

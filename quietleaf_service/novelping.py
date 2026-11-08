@@ -8,7 +8,7 @@ from urllib.parse import quote, urlsplit
 from bs4 import BeautifulSoup
 
 from .adapters import HtmlSource, SourceError, require_id
-from .content import clean_chapter_text
+from .content import clean_chapter_text, is_hidden_html, remove_hidden_elements
 
 MAX_CHAPTER_INDEX_BYTES = 8 * 1024 * 1024
 
@@ -262,11 +262,13 @@ class NovelPingSource(HtmlSource):
             ".reading-content", ".read-content", '[class*="chapterContent"]',
             '[class*="chapter-content"]', "article",
         ):
-            node = page.select_one(selector)
+            node = next((candidate for candidate in page.select(selector)
+                         if not is_hidden_html(candidate) and not any(is_hidden_html(parent) for parent in candidate.parents)), None)
             if node is None:
                 continue
             for child in node.select("script,style,noscript,iframe,nav,button,form,.advertisement,.ads"):
                 child.decompose()
+            remove_hidden_elements(node)
             chunks = [p.get_text(" ", strip=True) for p in node.select("p")]
             text = "\n\n".join(chunk for chunk in chunks if chunk)
             if len(text) < 80:

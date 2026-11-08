@@ -14,7 +14,7 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from .adapters import MAX_TEXT_BYTES, HtmlSource, SourceError, require_id
-from .content import clean_chapter_text
+from .content import clean_chapter_text, remove_hidden_elements
 from .metadata import display_title
 
 
@@ -186,6 +186,7 @@ class WtrLabSource(HtmlSource):
         page = BeautifulSoup(value, "html.parser")
         for node in page(["script", "style"]):
             node.decompose()
+        remove_hidden_elements(page)
         return page.get_text("\n", strip=True)
 
     def _book(self, record: dict) -> dict:
