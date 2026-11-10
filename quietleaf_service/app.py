@@ -692,6 +692,7 @@ def build_from_env() -> FastAPI:
         sources.append(WtrLabSource(
             base_url=os.getenv("QUIETLEAF_WTRLAB_BASE_URL", "https://wtr-lab.com"),
             access_authorized=os.getenv("QUIETLEAF_WTRLAB_ACCESS_AUTHORIZED", "").lower() in {"1", "true", "yes"},
+            session_cookie=os.getenv("QUIETLEAF_WTRLAB_COOKIE", ""),
         ))
     archive_dir = Path(os.getenv("QUIETLEAF_ARCHIVE_DIR", str(Path(__file__).resolve().parent.parent / "archive")))
     archive_cap = int(os.getenv("QUIETLEAF_ARCHIVE_MAX_BYTES", str(2 * 1024 * 1024 * 1024)))

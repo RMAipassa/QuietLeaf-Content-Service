@@ -6,6 +6,7 @@ import json
 import re
 import threading
 import time
+from http.cookies import CookieError, SimpleCookie
 from urllib.parse import quote, urlsplit
 
 import httpx
@@ -21,7 +22,7 @@ from .metadata import display_title, publication_status
 MAX_JSON_BYTES = 4 * 1024 * 1024
 MAX_CHAPTERS = 10_000
 GLOSSARY_KEY = bytes.fromhex("16c3e08f3a5fbccd2742b7393ab3c10fe764b06199fa570195d70f5d2a0e84f1")
-GLOSSARY_MARKER = re.compile(r"»([A-Za-z0-9_-]{1,64})⛬")
+GLOSSARY_MARKER = re.compile(r"(?:»([A-Za-z0-9_-]{1,64})|※([0-9]{1,6}))[⛬〓]")
 CHAPTER_ID = re.compile(r"chapter-([1-9][0-9]*)")
 BOOK_ID_QUERY = re.compile(r"(?:#|id:\s*)?([0-9]+)", re.I)
 GENRES = {
@@ -52,9 +53,22 @@ class WtrLabSource(HtmlSource):
     }
 
     def __init__(self, base_url: str = "https://wtr-lab.com", client: httpx.Client | None = None,
-                 access_authorized: bool = False):
+                 access_authorized: bool = False, session_cookie: str = ""):
         if not access_authorized:
             raise SourceError("WTR-LAB requires explicit access authorization")
+        cookie = session_cookie.strip()
+        if cookie:
+            origin = urlsplit(base_url)
+            if origin.scheme != "https" or origin.hostname != "wtr-lab.com" or origin.port not in (None, 443):
+                raise SourceError("WTR-LAB account sessions require https://wtr-lab.com")
+            if len(session_cookie) > 8192 or any(ord(char) < 32 or ord(char) > 126 for char in session_cookie):
+                raise SourceError("Invalid WTR-LAB session cookie")
+            try:
+                parsed = SimpleCookie(cookie)
+            except CookieError:
+                raise SourceError("Invalid WTR-LAB session cookie") from None
+            if not parsed:
+                raise SourceError("Invalid WTR-LAB session cookie")
         super().__init__({
             "id": "wtr-lab",
             "name": "WTR-LAB",
@@ -66,10 +80,16 @@ class WtrLabSource(HtmlSource):
             "allowedImageHosts": ["img.wtr-lab.com"],
         }, client=client)
         self.agent = "QuietLeafPersonalReader/0.4"
+        self._session_cookie = cookie
         self._slugs: dict[str, str] = {}
         self._slug_lock = threading.Lock()
         self._home_cache: dict[str, list[dict]] | None = None
         self._home_lock = threading.Lock()
+
+    def _account_error(self) -> SourceError:
+        if self._session_cookie:
+            return SourceError("WTR-LAB account session expired or was rejected. Renew QUIETLEAF_WTRLAB_COOKIE on the content service and restart it.")
+        return SourceError("WTR-LAB requires a signed-in account after the first 10 AI-translated chapters. Sign in at https://wtr-lab.com/auth/login, configure QUIETLEAF_WTRLAB_COOKIE on the content service, and restart it.")
 
     def _request(self, method: str, path: str, *, body: dict | None = None,
                  max_bytes: int = MAX_JSON_BYTES, accept: str = "application/json") -> bytes:
@@ -85,7 +105,14 @@ class WtrLabSource(HtmlSource):
                 time.sleep(delay)
             self._last_request = time.monotonic()
             headers = {"User-Agent": self.agent, "Accept": accept}
-            with self.client.stream(method, target, headers=headers, json=body) as response:
+            origin = urlsplit(target)
+            account_origin = origin.scheme == "https" and origin.hostname == "wtr-lab.com" and origin.port in (None, 443)
+            if self._session_cookie and account_origin:
+                headers["Cookie"] = self._session_cookie
+            elif not account_origin:
+                # Override httpx's cookie jar too: domain cookies must not reach the cover CDN.
+                headers["Cookie"] = ""
+            with self.client.stream(method, target, headers=headers, json=body, follow_redirects=False) as response:
                 if response.is_redirect:
                     location = response.headers.get("Location", "")
                     redirected = urlsplit(location)
@@ -95,6 +122,8 @@ class WtrLabSource(HtmlSource):
                             or not redirected.path.startswith("/") or len(location) > 2048):
                         raise SourceError("WTR-LAB redirect blocked; the integration may need an update")
                     redirected_to = redirected.geturl()
+                elif response.status_code == 401:
+                    raise self._account_error()
                 elif response.status_code != 200:
                     raise SourceError(f"WTR-LAB returned HTTP {response.status_code}")
                 content = bytearray()
@@ -119,6 +148,10 @@ class WtrLabSource(HtmlSource):
             raise SourceError("WTR-LAB returned an unexpected response")
         if payload.get("requireTurnstile") or payload.get("turnstile_required"):
             raise SourceError("WTR-LAB requires interactive verification; QuietLeaf will not bypass it")
+        if payload.get("code") in (1401, "1401"):
+            raise self._account_error()
+        if payload.get("code") == "CHAPTER_LOCKED":
+            raise SourceError("This WTR-LAB chapter is locked. Unlock it on WTR-LAB with your account before retrying.")
         if payload.get("success") is False:
             message = payload.get("error")
             if message == "Novel not found":
@@ -338,11 +371,15 @@ class WtrLabSource(HtmlSource):
 
     @staticmethod
     def _decode_glossary(entries: object) -> dict[str, str]:
-        if not isinstance(entries, dict):
+        if isinstance(entries, list):
+            items = ((str(index), pair) for index, pair in enumerate(entries))
+        elif isinstance(entries, dict):
+            items = entries.items()
+        else:
             return {}
         decoded = {}
         cipher = AESGCM(GLOSSARY_KEY)
-        for marker, pair in entries.items():
+        for marker, pair in items:
             if not isinstance(marker, str) or not isinstance(pair, list) or not pair:
                 continue
             value = pair[0] if isinstance(pair[0], str) else ""
@@ -354,6 +391,8 @@ class WtrLabSource(HtmlSource):
                     value = cipher.decrypt(iv, ciphertext, None).decode("utf-8")
                 except (KeyError, TypeError, ValueError, UnicodeDecodeError, InvalidTag):
                     value = ""
+            if not value and isinstance(entries, list) and len(pair) > 1 and isinstance(pair[1], str):
+                value = pair[1].replace("_", "")
             if value:
                 decoded[marker] = value
         return decoded
@@ -399,7 +438,9 @@ class WtrLabSource(HtmlSource):
         for item in body:
             if not isinstance(item, str):
                 continue
-            hydrated = GLOSSARY_MARKER.sub(lambda found: replacements.get(found.group(1), found.group(0)), item)
+            hydrated = GLOSSARY_MARKER.sub(lambda found: replacements.get(found.group(1) or found.group(2), found.group(0)), item)
+            if GLOSSARY_MARKER.search(hydrated):
+                raise SourceError("WTR-LAB chapter glossary is incomplete. Retry later; unresolved names were not saved.")
             value = self._plain_text(hydrated)
             if value:
                 paragraphs.append(value)

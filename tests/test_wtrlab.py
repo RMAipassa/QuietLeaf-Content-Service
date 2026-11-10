@@ -83,10 +83,11 @@ def routes(request):
     return httpx.Response(404)
 
 
-def source(responder=routes):
+def source(responder=routes, **kwargs):
     adapter = WtrLabSource(
         client=httpx.Client(transport=httpx.MockTransport(responder), follow_redirects=False),
         access_authorized=True,
+        **kwargs,
     )
     adapter.min_interval = 0
     return adapter
@@ -277,6 +278,159 @@ def test_encrypted_glossary_fallback():
     assert WtrLabSource._decode_glossary(entries) == {}
 
 
+@pytest.mark.parametrize("terminator", ["⛬", "〓"])
+def test_indexed_v3_glossary_restores_the_reported_novels_names(terminator):
+    # Current Game Arrival chapter 1 uses a zero-based array and ※13 for Lin Feng.
+    terms = [["Term " + str(index), "原文"] for index in range(16)]
+    terms[0] = ["Canglan Third Vocational College", "沧澜第三职业学院"]
+    terms[13] = ["Lin Feng", "林峰"]
+    terms[14] = ["Li Ao", "李傲"]
+
+    def respond(request):
+        response = routes(request)
+        if request.url.path == "/api/v2/reader/content":
+            payload = response.json()
+            payload["data"]["data"] = {
+                "body": [f'"※13{terminator}! Stand up!"', f"※14{terminator} waited at ※0{terminator}."],
+                "glossary_data": {"version": 3, "terms": terms},
+            }
+            return httpx.Response(200, json=payload)
+        return response
+
+    assert source(respond).text(BOOK_ID, "chapter-1") == (
+        '"Lin Feng! Stand up!"\n\nLi Ao waited at Canglan Third Vocational College.'
+    )
+
+
+def test_indexed_glossary_handles_outer_metadata_and_raw_fallback():
+    def respond(request):
+        response = routes(request)
+        if request.url.path == "/api/v2/reader/content":
+            return httpx.Response(200, json={"data": {
+                "data": {"body": ["※0⛬ met ※1⛬."]},
+                "glossary_data": {"version": 3, "terms": [["Lin Feng", "林峰"], ["", "_李傲_"]]},
+            }})
+        return response
+
+    assert source(respond).text(BOOK_ID, "chapter-1") == "Lin Feng met 李傲."
+
+
+@pytest.mark.parametrize("marker", ["※99⛬", "»missing⛬"])
+def test_missing_glossary_terms_fail_instead_of_returning_corrupt_names(marker):
+    def respond(request):
+        response = routes(request)
+        if request.url.path == "/api/v2/reader/content":
+            payload = response.json()
+            payload["data"]["data"]["body"] = [f"The hero {marker} returned."]
+            return httpx.Response(200, json=payload)
+        return response
+
+    with pytest.raises(SourceError, match="glossary is incomplete"):
+        source(respond).text(BOOK_ID, "chapter-1")
+
+
+@pytest.mark.parametrize("authenticated", [False, True])
+@pytest.mark.parametrize("http_status", [200, 401])
+def test_account_requirement_is_actionable_and_stops_before_signed_content(authenticated, http_status):
+    requested = []
+
+    def respond(request):
+        if request.url.path != "/api/reader/get":
+            return routes(request)
+        requested.append(request.url.path)
+        assert json.loads(request.content)["chapter_no"] == 11
+        return httpx.Response(http_status, json={"success": False, "error": "You are not logged in!", "code": 1401})
+
+    adapter = source(respond, session_cookie="better-auth.session_token=private-test-value" if authenticated else "")
+    with TestClient(make_app([adapter], "local-token")) as api:
+        response = api.get(f"/v1/books/wtr-lab/{BOOK_ID}/chapters/chapter-11/text",
+                           headers={"Authorization": "Bearer local-token"})
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert ("expired or was rejected" if authenticated else "first 10") in detail
+        assert "QUIETLEAF_WTRLAB_COOKIE" in detail
+        assert "private-test-value" not in detail
+        assert requested == ["/api/reader/get"]
+
+
+def test_configured_account_can_read_later_chapter_without_exposing_cookie_to_api_clients():
+    secret = "better-auth.session_token=private-test-value"
+    reader_requests = []
+
+    def respond(request):
+        assert request.headers.get("Cookie") == secret
+        if request.url.path == "/api/reader/get":
+            assert json.loads(request.content)["chapter_no"] == 11
+            reader_requests.append(request.url.path)
+            return httpx.Response(200, json={"success": True, "chapter": {"order": 11, "locked": False},
+                                             "content_url": "/api/v2/reader/content?token=signed-value"})
+        if request.url.path == "/api/v2/reader/content":
+            reader_requests.append(request.url.path)
+        return routes(request)
+
+    with TestClient(make_app([source(respond, session_cookie=secret)], "local-token")) as api:
+        headers = {"Authorization": "Bearer local-token"}
+        response = api.get(f"/v1/books/wtr-lab/{BOOK_ID}/chapters/chapter-11/text", headers=headers)
+        assert response.status_code == 200
+        assert response.text == "The translated term appeared.\n\nSecond paragraph."
+        health = api.get("/v1/health", headers=headers)
+        assert "private-test-value" not in health.text + response.text
+        assert "set-cookie" not in health.headers and "set-cookie" not in response.headers
+    assert reader_requests == ["/api/reader/get", "/api/v2/reader/content"]
+
+
+def test_session_cookie_reaches_reader_but_not_cover_cdn_or_redirects():
+    secret = "better-auth.session_token=private-test-value"
+    requested = []
+
+    def respond(request):
+        requested.append(request.url)
+        if request.url.host == "wtr-lab.com":
+            assert request.headers.get("Cookie") == secret
+        else:
+            assert not request.headers.get("Cookie")
+        return routes(request)
+
+    adapter = source(respond, session_cookie=secret)
+    # Even cookies refreshed by the source with a parent-domain scope must stay off the CDN.
+    adapter.client.cookies.set("better-auth.session_token", "jar-secret", domain=".wtr-lab.com", path="/")
+    assert "translated term" in adapter.text(BOOK_ID, "chapter-1")
+    assert adapter.cover_image(RECORD["data"]["image"])[0] == "image/jpeg"
+    assert [url.host for url in requested] == ["wtr-lab.com"] * 3 + ["img.wtr-lab.com"]
+
+    def redirect(_request):
+        return httpx.Response(307, headers={"Location": "https://evil.example/capture"})
+
+    adapter = source(redirect, session_cookie=secret)
+    adapter.client.follow_redirects = True
+    with pytest.raises(SourceError, match="redirect blocked"):
+        adapter.text(BOOK_ID, "chapter-1")
+
+
+@pytest.mark.parametrize("cookie", ["not-a-cookie", "token=secret\r\nOther: header", "token=secret\n", "token=" + "a" * 8192])
+def test_invalid_session_cookie_is_rejected_without_echoing_it(cookie):
+    with pytest.raises(SourceError, match="^Invalid WTR-LAB session cookie$"):
+        source(session_cookie=cookie)
+
+
+@pytest.mark.parametrize("base_url", ["https://evil.example", "http://wtr-lab.com", "https://wtr-lab.com:444"])
+def test_account_cookie_cannot_be_configured_for_another_origin(base_url):
+    with pytest.raises(SourceError, match="account sessions require"):
+        source(base_url=base_url, session_cookie="token=private-test-value")
+
+
+def test_locked_chapter_is_not_automatically_unlocked():
+    requested = []
+
+    def respond(request):
+        requested.append(request.url.path)
+        return httpx.Response(200, json={"success": False, "code": "CHAPTER_LOCKED", "cost": 10})
+
+    with pytest.raises(SourceError, match="Unlock it on WTR-LAB"):
+        source(respond, session_cookie="token=private-test-value").text(BOOK_ID, "chapter-11")
+    assert requested == ["/api/reader/get"]
+
+
 def test_home_feed_uses_distinct_current_paths_and_last_good_cache():
     requested = []
 
@@ -412,6 +566,7 @@ def test_build_from_env_requires_authorization_flag(tmp_path, monkeypatch):
     monkeypatch.setenv("QUIETLEAF_CATALOG_DIR", str(catalog))
     monkeypatch.setenv("QUIETLEAF_ARCHIVE_DIR", str(tmp_path / "archive"))
     monkeypatch.setenv("QUIETLEAF_ENABLE_WTRLAB", "1")
+    monkeypatch.delenv("QUIETLEAF_WTRLAB_COOKIE", raising=False)
     monkeypatch.delenv("QUIETLEAF_WTRLAB_ACCESS_AUTHORIZED", raising=False)
     with pytest.raises(SourceError, match="authorization"):
         build_from_env()
@@ -419,3 +574,14 @@ def test_build_from_env_requires_authorization_flag(tmp_path, monkeypatch):
     monkeypatch.setenv("QUIETLEAF_WTRLAB_ACCESS_AUTHORIZED", "1")
     app = build_from_env()
     assert any(route.path == "/v1/search" for route in app.routes)
+
+    configured = []
+
+    def capture(**kwargs):
+        configured.append(kwargs)
+        return source()
+
+    monkeypatch.setattr("quietleaf_service.app.WtrLabSource", capture)
+    monkeypatch.setenv("QUIETLEAF_WTRLAB_COOKIE", "token=private-test-value")
+    build_from_env()
+    assert configured[0]["session_cookie"] == "token=private-test-value"

@@ -71,6 +71,41 @@ def test_novelping_search_and_details():
     assert [b["id"] for b in adapter.recent()] == [BOOK]
 
 
+def test_percent_search_preserves_upstream_results_and_displays_unescaped_titles():
+    def respond(request):
+        if request.url.path == "/search":
+            assert request.url.params["keyword"] == "100% drop rate"
+            return httpx.Response(200, text=r'''
+                <div id="search-results">
+                  <h3 class="novel-title"><a href="/book/global-lord">Global Lord: 100\% Drop Rate</a></h3>
+                  <h3 class="novel-title"><a href="/book/other-match">100\% Item Drop Rate</a></h3>
+                </div>
+                <aside><a href="/book/unrelated">100% Drop Rate Recommendation</a></aside>''')
+        if request.url.path == "/book/global-lord":
+            return httpx.Response(200, text=r'<h1>Global Lord: 100\% Drop Rate</h1>')
+        return routes(request)
+
+    adapter = source(respond)
+    with TestClient(make_app([adapter], "local-token")) as api:
+        response = api.get("/v1/search", params={"source": "novelping", "q": "100% drop rate"},
+                           headers={"Authorization": "Bearer local-token"})
+        assert response.status_code == 200
+        assert response.json()["errors"] == []
+        assert [(b["id"], b["title"]) for b in response.json()["items"]] == [
+            ("global-lord", "Global Lord: 100% Drop Rate"), ("other-match", "100% Item Drop Rate"),
+        ]
+    assert adapter.details("global-lord")["title"] == "Global Lord: 100% Drop Rate"
+
+
+def test_empty_explicit_search_results_do_not_fall_back_to_recommendations():
+    def respond(request):
+        if request.url.path == "/search":
+            return httpx.Response(200, text='<div id="search-results">No matches.</div><a href="/book/test">Test Novel</a>')
+        return routes(request)
+
+    assert source(respond).search("Test") == []
+
+
 def test_novelping_home_feed_paths_bounds_deduplication_and_cache():
     requested = []
     fail_refresh = False

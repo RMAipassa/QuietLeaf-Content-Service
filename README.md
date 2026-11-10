@@ -155,11 +155,15 @@ The Android app sees the `novelping` provider through its existing **My content 
 
 If the website uses a different search route, set `QUIETLEAF_NOVELPING_SEARCH_PATH` to a relative path containing `{query}`. For example, `'/search?q={query}'`. If NovelPing changes to a verifiably authentic new domain, change `QUIETLEAF_NOVELPING_BASE_URL` and restart the service. The source IDs and chapter identifiers remain independent of its domain.
 
+Service v0.12.1 preserves the website's explicit search results instead of applying a second exact-phrase filter. NovelPing's escaped `\%` is displayed as `%`, including saved server metadata. A search for `100% drop rate` now returns the site's matches; recommendations outside the result area are excluded even when the search has no results.
+
 ## WTR-LAB opt-in integration
 
-The dedicated `wtr-lab` source supports search, browse shelves, metadata, full chapter lists, chapter text, covers, Android downloads, and the server archive. It uses WTR-LAB's public same-origin page and reader requests without logging in or bypassing interactive verification. All upstream requests, including signed chapter content and cover images, share a process-local limit of one request every two seconds.
+The dedicated `wtr-lab` source supports search, browse shelves, metadata, full chapter lists, chapter text, covers, Android downloads, and the server archive. It uses WTR-LAB's same-origin page and reader requests, with optional account-session configuration below. All upstream requests, including signed chapter content and cover images, share a process-local limit of one request every two seconds.
 
 WTR-LAB's `%{visible name|alternate-name metadata}` title annotations are displayed as their visible names in book and chapter titles. This also applies when serving previously saved server archives, even with the live adapter disabled. Refresh the Android home shelves or book details to replace old cached titles.
+
+Service v0.12.1 also supports the current indexed chapter glossary (`※13⛬` / `※13〓`) alongside the older dictionary/encrypted glossary. For example, *Game Arrival: 100% Drop Rate, I'm Invincible!* chapter 1 now displays **Lin Feng** rather than `※13⛬`. Missing glossary entries produce a retryable error instead of saving unreadable names. Existing plain-text downloads do not contain the glossary needed to repair those markers. For affected chapters already saved on the server, use **Re-archive** in the service console. Delete and re-download any affected phone-local copies afterward.
 
 Recognized source promotional sentences (for example, “Hosted on NovelPing” or “Source is WTR-LAB”) are removed from chapter text for the matching provider. Cleanup applies to new source responses and previously stored server chapters when served, without rewriting the archive. Ordinary story prose and dialogue are preserved. Android v0.9.1 also applies the cleanup while reading old phone-local downloads.
 
@@ -177,6 +181,18 @@ export QUIETLEAF_ENABLE_WTRLAB=1
 export QUIETLEAF_WTRLAB_ACCESS_AUTHORIZED=1
 docker compose up --build -d
 ```
+
+### WTR-LAB account session (v0.12.1)
+
+WTR-LAB permits guests to preview only the first **10 AI-translated chapters**. Later chapters return account-required code `1401`; the enable/authorization flags above do not sign you in.
+
+1. Sign in to your own account at `https://wtr-lab.com/auth/login` in your browser and complete any site verification there.
+2. In the browser's developer tools **Network** panel, open a successful `/api/reader/get` request. Copy the **value** of its request `Cookie` header (the `name=value; name=value` pairs, without `Cookie:`).
+3. Set `QUIETLEAF_WTRLAB_COOKIE` to that value in the service's private AMP environment or ignored `.env` file, then restart the content service. Docker Compose forwards the same variable. No Android update or phone-side source configuration is required.
+
+The session stays on the service and is sent only to `https://wtr-lab.com:443`, never to the image CDN, redirect destinations, API clients, or health responses. Cookie configuration with an alternate base origin is rejected. Treat the value as an account credential: do not commit or share it. If WTR-LAB expires or revokes the session, sign in again and replace it; QuietLeaf reports this explicitly. The service does not store your account password, sign in automatically, or spend account credits to unlock chapters. Unlock any locked chapter on WTR-LAB first.
+
+Guest chapter 1 and the chapter-11 account-required response have been checked live. Authenticated chapter access requires your configured valid session; tests verify forwarding, expiry errors, redirect/CDN isolation, and locked-chapter handling using fixtures.
 
 The adapter rejects page, API, and reader redirects, untrusted content and cover hosts, oversized responses, and Turnstile challenges. Covers permit only WTR-LAB's single HTTPS image-proxy handoff to the allowlisted `img.wtr-lab.com` host; further redirects remain blocked. It does not bypass authentication, CAPTCHA, paywalls, or other access controls. WTR-LAB is then exposed through Android's existing **My content service** discovery source; no separate Android provider configuration is required. A full archive can take substantial time because each reader initialization and signed-content request remains subject to the shared two-second interval.
 

@@ -23,6 +23,7 @@ services:
       QUIETLEAF_ENABLE_WTRLAB: "${QUIETLEAF_ENABLE_WTRLAB:-0}"
       QUIETLEAF_WTRLAB_ACCESS_AUTHORIZED: "${QUIETLEAF_WTRLAB_ACCESS_AUTHORIZED:-0}"
       QUIETLEAF_WTRLAB_BASE_URL: "${QUIETLEAF_WTRLAB_BASE_URL:-https://wtr-lab.com}"
+      QUIETLEAF_WTRLAB_COOKIE: "${QUIETLEAF_WTRLAB_COOKIE:-}"
     volumes:
       - ./catalog:/app/catalog:ro
       - ./archive:/app/archive:rw

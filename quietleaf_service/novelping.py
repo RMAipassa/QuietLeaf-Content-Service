@@ -9,7 +9,7 @@ from bs4 import BeautifulSoup
 
 from .adapters import HtmlSource, SourceError, require_id
 from .content import clean_chapter_text, is_hidden_html, remove_hidden_elements
-from .metadata import publication_status
+from .metadata import display_title, publication_status
 
 MAX_CHAPTER_INDEX_BYTES = 8 * 1024 * 1024
 
@@ -62,9 +62,11 @@ class NovelPingSource(HtmlSource):
         result = []
         seen = set()
         needle = query.strip().casefold()
-        links = page.select('#search-results h3.novel-title > a[href*="/book/"]')
+        results = page.select_one("#search-results")
+        scope = results if results is not None else page
+        links = scope.select('h3.novel-title > a[href*="/book/"]')
         if not links:
-            links = page.select('a[href*="/book/"]')
+            links = scope.select('a[href*="/book/"]')
         for link in links:
             href = link.get("href", "")
             try:
@@ -79,11 +81,14 @@ class NovelPingSource(HtmlSource):
                 title = cover.get("alt", "").strip() if cover else ""
             if not title or title.casefold() in {"read", "read now", "details", "more", "chapter list"}:
                 continue
+            title = display_title(self.id, title)
             wrapper = link.find_parent("div", class_="row") or link.find_parent(["div", "article", "li"], class_=re.compile("novel|book|item|card", re.I))
             context = wrapper or link.parent or link
             author = self._nearby_text(context, (".author", ".byline", '[class*="author"]')) or "Unknown"
             genre_text = self._nearby_text(context, (".genre", '[class*="genre"]'))
-            if needle and needle not in f"{title} {author}".casefold():
+            # The explicit result area already reflects the site's search semantics.
+            # Only filter fallback links, which may include unrelated navigation.
+            if results is None and needle and needle not in f"{title} {author}".casefold():
                 continue
             if genre and genre.casefold() not in genre_text.casefold():
                 continue
@@ -220,7 +225,7 @@ class NovelPingSource(HtmlSource):
         genre = genre_meta.get("content", "").strip() if genre_meta else ""
         return {
             "id": book_id,
-            "title": heading.get_text(" ", strip=True),
+            "title": display_title(self.id, heading.get_text(" ", strip=True)),
             "author": author or self._field(page, "Author") or "Unknown",
             "description": description,
             "genre": ", ".join(part.strip().title() for part in genre.split(",") if part.strip()) or self._field(page, "Genre"),
@@ -250,7 +255,7 @@ class NovelPingSource(HtmlSource):
                 chapter_id = require_id(suffix)
             except SourceError:
                 continue
-            title = link.get_text(" ", strip=True) or chapter_id.replace("-", " ").title()
+            title = display_title(self.id, link.get_text(" ", strip=True)) or chapter_id.replace("-", " ").title()
             number = re.match(r"chapter-(\d+)(?:-|$)", chapter_id, re.I)
             item = (int(number.group(1)) if number else None, chapter_id, title)
             existing = chapters.get(chapter_id)
