@@ -194,6 +194,24 @@ The session stays on the service and is sent only to `https://wtr-lab.com:443`, 
 
 Guest chapter 1 and the chapter-11 account-required response have been checked live. Authenticated chapter access requires your configured valid session; tests verify forwarding, expiry errors, redirect/CDN isolation, and locked-chapter handling using fixtures.
 
+### Optional Camoufox browser probe (v0.12.2)
+
+The one-shot `quietleaf_service.browser_probe` diagnostic tests whether a real browser on the current host can render chapters **1 and 11** of *Game Arrival: 100% Drop Rate, I'm Invincible!*. It uses `QUIETLEAF_WTRLAB_COOKIE` and `QUIETLEAF_WTRLAB_ACCESS_AUTHORIZED` from the process environment or private `.env`. Only the account session token is imported into the browser; analytics and copied Cloudflare clearance cookies are excluded.
+
+```bash
+python -m pip install '.[browser-test]'
+python -m camoufox fetch
+python -m quietleaf_service.browser_probe
+```
+
+Install the browser's native dependencies first. Linux also requires `Xvfb` (`sudo apt-get install xvfb` on Debian/Ubuntu); the probe uses a virtual display there. Windows services require a Python installation accessible to the AMP service account. A Python installed only under an interactive user's profile is insufficient. Browser binaries, package/model data and runtime directories must be accessible to that same service account. Allow several GB of disk space for the browser and its dependencies.
+
+The probe prints JSON status lines, character counts and a glossary-name check, never cookies, account details, chapter prose, page dumps, screenshots or raw exception messages. It spaces intercepted WTR-LAB requests by two seconds, blocks unrelated hosts and source image/font/media loads, caps source requests and stops on verification/login/locked-chapter screens. The overall browser-test timeout defaults to nine minutes. It does not click CAPTCHAs, unlock chapters, write archives, or register a browser-backed source adapter.
+
+For a dedicated **test** Python App Runner instance, use setup command `python -m pip install '.[browser-test]'`, module `quietleaf_service.browser_probe`, and arguments `--fetch-browser`. Set the source variables privately first and provide the native dependencies on the host. The explicit fetch flag downloads the browser before starting the bounded test. Disable automatic restart/sleep for this one-shot diagnostic. Successful completion exits with code 0; an unsuccessful browser test exits 1; a prerequisite/configuration error exits 2. `--headed` can show the browser on an existing desktop, and `--browser-path` can select an already-installed Camoufox executable.
+
+This is a feasibility diagnostic, not automatic integration into the existing HTTP source. A successful local run establishes the result only for that machine, browser and account session; the production AMP host still needs its own check.
+
 The adapter rejects page, API, and reader redirects, untrusted content and cover hosts, oversized responses, and Turnstile challenges. Covers permit only WTR-LAB's single HTTPS image-proxy handoff to the allowlisted `img.wtr-lab.com` host; further redirects remain blocked. It does not bypass authentication, CAPTCHA, paywalls, or other access controls. WTR-LAB is then exposed through Android's existing **My content service** discovery source; no separate Android provider configuration is required. A full archive can take substantial time because each reader initialization and signed-content request remains subject to the shared two-second interval.
 
 NovelBin is not preconfigured. It can use the generic adapter when you have a workable, permissible source and stable HTML. An adapter configuration does not grant rights to a novel.
