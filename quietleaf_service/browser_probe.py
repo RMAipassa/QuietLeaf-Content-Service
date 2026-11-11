@@ -60,10 +60,11 @@ def chapter_state(text: str) -> str:
 
 
 class RequestGate:
-    def __init__(self):
+    def __init__(self, max_requests: int = 200):
         self.lock = asyncio.Lock()
         self.last_request = 0.0
         self.requests = 0
+        self.max_requests = max_requests
 
     async def route(self, route) -> None:
         request = route.request
@@ -78,7 +79,7 @@ class RequestGate:
         if url.hostname in SOURCE_HOSTS:
             async with self.lock:
                 await asyncio.sleep(max(0.0, 2.0 - (time.monotonic() - self.last_request)))
-                if self.requests >= 200:
+                if self.requests >= self.max_requests:
                     await route.abort()
                     return
                 self.last_request = time.monotonic()

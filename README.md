@@ -212,6 +212,21 @@ For a dedicated **test** Python App Runner instance, use setup command `python -
 
 This is a feasibility diagnostic, not automatic integration into the existing HTTP source. A successful local run establishes the result only for that machine, browser and account session; the production AMP host still needs its own check.
 
+### Sustained Camoufox archive-job diagnostic (v0.12.3)
+
+`quietleaf_service.browser_archive_probe` tests the real `ArchiveWorker` and SQLite archive, fetching the first **40 consecutive chapters** of the same WTR-LAB novel. It retains one browser context throughout the job and runs the existing metadata, reader initialization, signed-content and glossary contracts through same-origin browser `fetch`. Every intercepted WTR-LAB request shares the two-second gate, including the initial page's scripts. Browser rendering is used to bootstrap the session; individual chapter responses are decoded by the existing WTR-LAB adapter.
+
+```bash
+python -m quietleaf_service.browser_archive_probe \
+  --archive-dir ./camoufox-archive-test-40 --chapters 40 --timeout 900
+```
+
+The optional browser dependencies and account/authorization variables above are required. Use a dedicated output directory whose name starts with `camoufox-archive-test`; never pass the production archive. The diagnostic excludes covers and limits its chapter list to the selected consecutive range (maximum 100). It fails if that range includes locked/unavailable chapters. It does not spend credits or solve verification challenges.
+
+Progress is logged only after the worker's durable job state changes. A verification response stops the job and retains previously saved chapters. To explicitly retry the same durable checkpoint after resolving the access requirement, rerun with `--resume`. A fresh run requires a fresh directory; its summary distinguishes **saved chapters** from **chapters fetched this run**, so cached files cannot masquerade as a successful sustained download. Automatic following is disabled after the run. The same module can be launched by a dedicated AMP test instance, with output visible in its console.
+
+**Observed live result, 2026-11-10:** In a Windows AMP 2.8.0.10 service-account run with Camoufox 0.5.9, the 40-chapter job saved chapters **1–27**, then WTR-LAB requested interactive verification for **chapter 28**. The job stopped as failed with its 27/40 checkpoint intact. A read-only audit confirmed 27 distinct chapter bodies, 5,753–12,125 characters each, zero unresolved glossary markers, and no saved chapter-28 challenge response. This reproduces the sustained-download limitation: Camoufox browser transport alone does not eliminate WTR-LAB's periodic verification requirement.
+
 The adapter rejects page, API, and reader redirects, untrusted content and cover hosts, oversized responses, and Turnstile challenges. Covers permit only WTR-LAB's single HTTPS image-proxy handoff to the allowlisted `img.wtr-lab.com` host; further redirects remain blocked. It does not bypass authentication, CAPTCHA, paywalls, or other access controls. WTR-LAB is then exposed through Android's existing **My content service** discovery source; no separate Android provider configuration is required. A full archive can take substantial time because each reader initialization and signed-content request remains subject to the shared two-second interval.
 
 NovelBin is not preconfigured. It can use the generic adapter when you have a workable, permissible source and stable HTML. An adapter configuration does not grant rights to a novel.
