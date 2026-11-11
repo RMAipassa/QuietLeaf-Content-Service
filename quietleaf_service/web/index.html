@@ -134,7 +134,21 @@
           <label class="search-field"><span>Filter</span><input id="book-filter" type="search" placeholder="Title, author, or source"></label>
         </div>
         <div class="archive-tools">
-          <p class="muted">Re-archive saved chapters to replace old text using the current source extractor. Existing copies stay readable until replacements succeed.</p>
+          <div class="archive-range-options">
+            <p class="muted">Re-archive saved chapters to replace old text using the current source extractor. Existing copies stay readable until replacements succeed.</p>
+            <div class="configuration-grid rearchive-range">
+              <label class="configuration-field" for="rearchive-scope"><span>Chapters to refresh</span>
+                <select id="rearchive-scope"><option value="all">All saved chapters</option><option value="range">Chapter range</option></select>
+              </label>
+              <label class="configuration-field" for="rearchive-start"><span>From chapter</span>
+                <input id="rearchive-start" type="number" min="1" max="100000" step="1" value="1" disabled>
+              </label>
+              <label class="configuration-field" for="rearchive-end"><span>Through chapter</span>
+                <input id="rearchive-end" type="number" min="1" max="100000" step="1" value="20" disabled>
+              </label>
+            </div>
+            <p id="rearchive-range-note" class="muted">Inclusive, one-based positions in the full chapter list. Only saved chapters are refreshed. Applies to individual and selected novels.</p>
+          </div>
           <button id="rearchive-selected" class="secondary-button" type="button" disabled>Re-archive selected (0)</button>
         </div>
         <p id="book-result-note" class="muted"></p>

@@ -226,6 +226,25 @@ Service v0.13.1 includes safe per-reader snapshots: render state, body character
 
 The console also has a dedicated **Active jobs** panel directly below its summary. Queued, running and paused jobs come from authenticated `GET /v1/archive/jobs/active` and are independent of the recent-history limit. The separate history panel uses `GET /v1/archive/jobs?history_only=true` and shows the latest finished/failed jobs by their **last update**, so an old retried job remains visible when it finishes. Diagnostics includes an `activeJobs` collection too. Pause/resume/cancel controls and saved-novel progress use the active list even when those jobs are older than 100 history entries.
 
+### Re-archive a chapter range (v0.14.0)
+
+In **Saved novels**, change **Chapters to refresh** from **All saved chapters** to **Chapter range**, then enter **From chapter** and **Through chapter**, such as `1`–`20` or `39`–`58`. Click the novel's range button, or select novels and use the range batch button. The same chosen range applies to each selected novel. Active jobs and history display the range alongside its own refreshed/total count.
+
+Bounds are inclusive, one-based **positions in the full chapter list**, not numbers parsed from chapter titles and not positions in the downloaded subset. Only chapters with saved bodies inside that range are re-fetched. Missing saved copies are skipped without shifting the range; a range with no saved chapters or beyond the indexed chapter count is rejected. Other saved chapter bodies remain untouched. The existing restriction against simultaneous jobs for the same novel still applies.
+
+The single-book API accepts an optional JSON body:
+
+```http
+POST /v1/archive/wtr-lab/51691/refresh
+Content-Type: application/json
+
+{"startChapter":39,"endChapter":58}
+```
+
+For a batch, include the same `startChapter`/`endChapter` fields beside `items` in `POST /v1/archive/refresh`. Both bounds must be supplied as integers with `1 <= start <= end <= 100000`. Omitting both retains all-saved-chapter re-archiving, including existing clients that send no body.
+
+Jobs persist `range_start`/`range_end` and snapshot the selected chapter IDs at enqueue time. Pause/resume, retries and service restarts retain that exact target set and skip already-refreshed chapters; they do not expand a partial job into a whole-book refresh. Existing archive databases add the optional bounds automatically. Retrying a completed range job refreshes that same selected set again. Failed replacement attempts retain their old readable copies and existing source rate limits.
+
 ### Optional Camoufox browser probe (v0.12.2)
 
 The one-shot `quietleaf_service.browser_probe` diagnostic tests whether a real browser on the current host can render chapters **1 and 11** of *Game Arrival: 100% Drop Rate, I'm Invincible!*. It uses `QUIETLEAF_WTRLAB_COOKIE` and `QUIETLEAF_WTRLAB_ACCESS_AUTHORIZED` from the process environment or private `.env`. Only the account session token is imported into the browser; analytics and copied Cloudflare clearance cookies are excluded.

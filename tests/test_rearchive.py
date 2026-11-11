@@ -1,3 +1,4 @@
+import sqlite3
 import threading
 import time
 
@@ -279,3 +280,153 @@ def test_refresh_endpoints_require_auth_and_support_console_sessions_and_batch_v
         assert store.job(batch_id)["status"] == "completed"
         assert store.text(source.id, "book", "chapter-1") == "Fresh original text 2 for chapter-1."
         assert store.follow_status(source.id, "book") is None
+
+
+@pytest.mark.parametrize(("start", "end"), [(1, 20), (39, 58), (20, 20), (60, 60)])
+def test_refresh_range_is_one_based_inclusive_and_leaves_other_text_untouched(tmp_path, start, end):
+    source = Source()
+    source.count = 60
+    store = ArchiveStore(tmp_path)
+    seed(store, source, count=60)
+    store.follow(source.id, "book")
+    follow = store.follow_status(source.id, "book")
+    queued = store.enqueue(source.id, "book", refresh=True, start_chapter=start, end_chapter=end)
+    assert queued["range_start"] == start and queued["range_end"] == end
+    assert queued["total"] == end - start + 1
+    assert process(store, source)["status"] == "completed"
+    assert source.calls == [f"chapter-{n}" for n in range(start, end + 1)]
+    for n in range(1, 61):
+        expected = f"Fresh original text 1 for chapter-{n}." if start <= n <= end else f"Old original text for chapter-{n}"
+        assert store.text(source.id, "book", f"chapter-{n}") == expected
+    assert store.follow_status(source.id, "book") == follow
+
+
+def test_range_positions_use_the_full_index_not_the_saved_subset_or_ordinal_value(tmp_path):
+    source = Source()
+    source.count = 10
+    store = ArchiveStore(tmp_path)
+    store.save_book(source.id, source.details("book"))
+    chapters = source.chapters("book")
+    for chapter in chapters:
+        chapter["ordinal"] = (chapter["ordinal"] + 1) * 10
+    store.save_chapters(source.id, "book", chapters)
+    for n in (1, 4, 7, 10):
+        store.save_text(source.id, "book", f"chapter-{n}", f"Old chapter {n}.")
+    job = store.enqueue(source.id, "book", refresh=True, start_chapter=3, end_chapter=7)
+    assert job["total"] == 2
+    assert [row["id"] for row in store.refresh_targets(job["id"])] == ["chapter-4", "chapter-7"]
+    assert process(store, source)["status"] == "completed"
+    assert source.calls == ["chapter-4", "chapter-7"]
+    assert store.text(source.id, "book", "chapter-1") == "Old chapter 1."
+    assert store.text(source.id, "book", "chapter-3") is None
+
+
+@pytest.mark.parametrize(("start", "end"), [(None, 20), (1, None), (0, 20), (-1, 20), (20, 1),
+                                            (1, 61), (1, 100001), (True, 2), (1.5, 4)])
+def test_invalid_ranges_do_not_create_jobs(tmp_path, start, end):
+    source = Source()
+    source.count = 60
+    store = ArchiveStore(tmp_path)
+    seed(store, source, count=1)
+    store.save_chapters(source.id, "book", source.chapters("book"))
+    with pytest.raises(SourceError):
+        store.enqueue(source.id, "book", refresh=True, start_chapter=start, end_chapter=end)
+    assert store.jobs() == []
+
+
+def test_empty_saved_range_and_range_on_normal_archive_are_rejected(tmp_path):
+    source = Source()
+    store = ArchiveStore(tmp_path)
+    seed(store, source, count=1)
+    store.save_chapters(source.id, "book", source.chapters("book"))
+    with pytest.raises(SourceError, match="range has no saved chapters"):
+        store.enqueue(source.id, "book", refresh=True, start_chapter=2, end_chapter=3)
+    with pytest.raises(SourceError, match="only supported when re-archiving"):
+        store.enqueue(source.id, "book", start_chapter=1, end_chapter=1)
+    assert store.jobs() == []
+
+
+def test_active_refresh_deduplicates_only_the_same_range(tmp_path):
+    source = Source()
+    source.count = 60
+    store = ArchiveStore(tmp_path)
+    seed(store, source, count=60)
+    job = store.enqueue(source.id, "book", refresh=True, start_chapter=39, end_chapter=58)
+    assert store.enqueue(source.id, "book", refresh=True, start_chapter=39, end_chapter=58)["id"] == job["id"]
+    for bounds in ((1, 20), (None, None)):
+        with pytest.raises(SourceError, match="different re-archive range"):
+            store.enqueue(source.id, "book", refresh=True, start_chapter=bounds[0], end_chapter=bounds[1])
+    assert len(store.jobs()) == 1
+
+
+def test_range_checkpoint_survives_failure_restart_and_explicit_retry(tmp_path):
+    source = Source()
+    source.count = 60
+    store = ArchiveStore(tmp_path)
+    seed(store, source, count=60)
+    source.fail = "chapter-42"
+    job = store.enqueue(source.id, "book", refresh=True, start_chapter=39, end_chapter=58)
+    failed = process(store, source)
+    assert failed["status"] == "failed" and failed["downloaded"] == 3 and failed["total"] == 20
+    assert store.text(source.id, "book", "chapter-42") == "Old original text for chapter-42"
+    restarted = ArchiveStore(tmp_path)
+    assert restarted.job(job["id"])["range_start"] == 39 and restarted.job(job["id"])["range_end"] == 58
+    restarted.control(job["id"], "retry")
+    source.fail = ""
+    source.count = 61
+    completed = process(restarted, source)
+    assert completed["status"] == "completed" and completed["downloaded"] == completed["total"] == 20
+    assert source.calls == [f"chapter-{n}" for n in range(39, 43)] + [f"chapter-{n}" for n in range(42, 59)]
+    assert restarted.text(source.id, "book", "chapter-59") == "Old original text for chapter-59"
+    assert restarted.text(source.id, "book", "chapter-61") is None
+
+
+def test_batch_range_validation_is_atomic(tmp_path):
+    source = Source()
+    source.count = 60
+    store = ArchiveStore(tmp_path)
+    seed(store, source, "first", count=60)
+    source.count = 10
+    seed(store, source, "short", count=10)
+    with pytest.raises(SourceError, match="indexed chapters"):
+        store.enqueue_refresh_batch([(source.id, "first"), (source.id, "short")], 39, 58)
+    assert store.jobs() == []
+    with store._connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM refresh_chapters").fetchone()[0] == 0
+
+
+def test_range_endpoints_validate_payloads_and_apply_the_range_to_each_selected_book(tmp_path):
+    source = Source()
+    source.count = 60
+    with TestClient(make_app([source], TOKEN, tmp_path)) as api:
+        api.app.state.archive_worker.stop()
+        store = api.app.state.archive_store
+        seed(store, source, "first", count=60)
+        seed(store, source, "second", count=60)
+        for body in ({"startChapter": 1}, {"startChapter": 20, "endChapter": 1},
+                     {"startChapter": True, "endChapter": 20}, {"startChapter": 1.5, "endChapter": 20},
+                     {"startchapter": 1, "endchapter": 20}):
+            assert api.post("/v1/archive/fixture/first/refresh", headers=AUTH, json=body).status_code == 422
+        one = api.post("/v1/archive/fixture/first/refresh", headers=AUTH,
+                       json={"startChapter": 39, "endChapter": 58})
+        assert one.status_code == 202 and one.json()["total"] == 20
+        assert (one.json()["range_start"], one.json()["range_end"]) == (39, 58)
+        assert api.post(f"/v1/archive/jobs/{one.json()['id']}/cancel", headers=AUTH).status_code == 200
+        batch = api.post("/v1/archive/refresh", headers=AUTH, json={
+            "items": [{"source": "fixture", "bookId": "first"}, {"source": "fixture", "bookId": "second"}],
+            "startChapter": 1, "endChapter": 20,
+        })
+        assert batch.status_code == 202 and batch.json()["queued"] == 2
+        assert all((job["range_start"], job["range_end"], job["total"]) == (1, 20, 20)
+                   for job in batch.json()["items"])
+
+
+def test_existing_job_schema_migrates_to_optional_range_bounds(tmp_path):
+    with sqlite3.connect(tmp_path / "archive.sqlite3") as db:
+        db.execute("""CREATE TABLE jobs(id TEXT PRIMARY KEY,source TEXT,book_id TEXT,status TEXT,
+                      total INTEGER DEFAULT 0,downloaded INTEGER DEFAULT 0,refresh INTEGER DEFAULT 0,
+                      error TEXT DEFAULT '',run_token TEXT DEFAULT '',created_at INTEGER,updated_at INTEGER)""")
+        db.execute("INSERT INTO jobs(id,source,book_id,status,created_at,updated_at) VALUES('old','fixture','book','completed',1,1)")
+    store = ArchiveStore(tmp_path)
+    job = store.job("old")
+    assert job["status"] == "completed" and job["range_start"] is None and job["range_end"] is None

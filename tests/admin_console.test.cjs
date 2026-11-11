@@ -46,9 +46,11 @@ async function consoleFixture(initialJobs = []) {
     requests.push({ url, method, headers: new Headers(options.headers || {}), body: options.body });
     let payload;
     if (method === "POST" && (url === "/v1/archive/refresh" || url.endsWith("/refresh"))) {
-      const items = url === "/v1/archive/refresh" ? JSON.parse(options.body).items : [{ source: url.split("/")[3], bookId: url.split("/")[4] }];
+      const selection = options.body ? JSON.parse(options.body) : {};
+      const items = url === "/v1/archive/refresh" ? selection.items : [{ source: url.split("/")[3], bookId: url.split("/")[4] }];
       const queued = items.map((item, index) => ({ id: `job-${jobs.length + index + 1}`, source: item.source, book_id: item.bookId,
-        status: "queued", refresh: true, total: 3, downloaded: 0, updated_at: 1 }));
+        status: "queued", refresh: true, total: selection.startChapter ? selection.endChapter - selection.startChapter + 1 : 3,
+        downloaded: 0, updated_at: 1, range_start: selection.startChapter, range_end: selection.endChapter }));
       jobs.unshift(...queued);
       payload = url === "/v1/archive/refresh" ? { items: queued, queued: queued.length } : queued[0];
     } else if (method === "POST" && url.endsWith("/pause")) {
@@ -132,4 +134,51 @@ test("an old running job stays visible separately from a long recent history", a
   assert.match(elements.get("book-list").textContent, /95 \/ 335/);
   await button(elements.get("active-job-list"), "Pause").fire("click");
   assert.ok(button(elements.get("active-job-list"), "Resume"));
+});
+
+test("an individual re-archive sends an inclusive range and shows it with progress", async () => {
+  const { elements, requests } = await consoleFixture();
+  elements.get("rearchive-scope").value = "range";
+  elements.get("rearchive-start").value = "39";
+  elements.get("rearchive-end").value = "58";
+  await elements.get("rearchive-scope").fire("change");
+  assert.equal(elements.get("rearchive-start").disabled, false);
+  await button(elements.get("book-list"), "Re-archive chapters 39–58").fire("click");
+  const request = requests.find((item) => item.method === "POST");
+  assert.deepEqual(JSON.parse(request.body), { startChapter: 39, endChapter: 58 });
+  assert.match(elements.get("active-job-list").textContent, /0 \/ 20 chapters re-archived \| Chapters 39–58/);
+  assert.match(elements.get("book-list").textContent, /Chapters 39–58/);
+});
+
+test("the chosen range applies to every selected novel", async () => {
+  const { elements, requests } = await consoleFixture();
+  elements.get("rearchive-scope").value = "range";
+  elements.get("rearchive-start").value = "1";
+  elements.get("rearchive-end").value = "20";
+  await elements.get("rearchive-scope").fire("change");
+  const checkboxes = descendants(elements.get("book-list")).filter((item) => item.tagName === "INPUT" && item.type === "checkbox");
+  for (const checkbox of checkboxes) { checkbox.checked = true; await checkbox.fire("change"); }
+  assert.equal(elements.get("rearchive-selected").textContent, "Re-archive chapters 1–20 (2)");
+  await elements.get("rearchive-selected").fire("click");
+  const request = requests.find((item) => item.method === "POST");
+  assert.deepEqual(JSON.parse(request.body), { items: [
+    { source: "novelping", bookId: "first" }, { source: "wtr-lab", bookId: "second" },
+  ], startChapter: 1, endChapter: 20 });
+});
+
+test("invalid range input cannot queue a re-archive request", async () => {
+  const { elements, requests } = await consoleFixture();
+  elements.get("rearchive-scope").value = "range";
+  elements.get("rearchive-start").value = "58";
+  elements.get("rearchive-end").value = "39";
+  await elements.get("rearchive-scope").fire("change");
+  const action = button(elements.get("book-list"), "Re-archive chapter range");
+  assert.equal(action.disabled, true);
+  await action.fire("click");
+  assert.equal(requests.some((item) => item.method === "POST"), false);
+  assert.match(elements.get("rearchive-range-note").textContent, /whole chapter numbers/);
+  elements.get("rearchive-scope").value = "all";
+  await elements.get("rearchive-scope").fire("change");
+  assert.equal(elements.get("rearchive-start").disabled, true);
+  assert.ok(button(elements.get("book-list"), "Re-archive saved chapters"));
 });

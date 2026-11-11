@@ -22,6 +22,9 @@
   const privateUploadForm = byId("private-upload-form");
   const privateUploadStatus = byId("private-upload-status");
   const rearchiveSelected = byId("rearchive-selected");
+  const rearchiveScope = byId("rearchive-scope");
+  const rearchiveStart = byId("rearchive-start");
+  const rearchiveEnd = byId("rearchive-end");
   const selectedArchives = new Set();
   let queueingRefresh = false;
 
@@ -125,8 +128,35 @@
   }
 
   function updateRefreshSelection() {
-    rearchiveSelected.textContent = `Re-archive selected (${selectedArchives.size})`;
-    rearchiveSelected.disabled = queueingRefresh || !selectedArchives.size;
+    let range = {}, invalid = false;
+    try { range = selectedRange(); } catch (_) { invalid = true; }
+    rearchiveSelected.textContent = range.startChapter
+      ? `Re-archive chapters ${range.startChapter}–${range.endChapter} (${selectedArchives.size})`
+      : `Re-archive selected (${selectedArchives.size})`;
+    rearchiveSelected.disabled = queueingRefresh || !selectedArchives.size || invalid;
+  }
+
+  function selectedRange() {
+    if (rearchiveScope.value !== "range") return {};
+    const startChapter = Number(rearchiveStart.value), endChapter = Number(rearchiveEnd.value);
+    if (!Number.isInteger(startChapter) || !Number.isInteger(endChapter)
+        || startChapter < 1 || endChapter < startChapter || endChapter > 100000) {
+      throw new Error("Enter whole chapter numbers with 1 ≤ From ≤ Through ≤ 100000.");
+    }
+    return { startChapter, endChapter };
+  }
+
+  function updateRangeSelection() {
+    rearchiveStart.disabled = rearchiveEnd.disabled = rearchiveScope.value !== "range";
+    let note = "Inclusive, one-based positions in the full chapter list. Only saved chapters are refreshed. Applies to individual and selected novels.";
+    try { selectedRange(); } catch (error) { note = error.message; }
+    byId("rearchive-range-note").textContent = note;
+    renderBooks();
+    updateRefreshSelection();
+  }
+
+  function jobRangeLabel(job) {
+    return job.refresh && job.range_start ? ` | Chapters ${job.range_start}–${job.range_end}` : "";
   }
 
   function renderSummary() {
@@ -174,6 +204,8 @@
   function renderBooks() {
     const list = byId("book-list");
     const needle = bookFilter.value.trim().toLowerCase();
+    let range = {}, invalidRange = false;
+    try { range = selectedRange(); } catch (_) { invalidRange = true; }
     const books = state.books.filter((book) =>
       `${book.title} ${book.author} ${book.source}`.toLowerCase().includes(needle)
     );
@@ -192,7 +224,7 @@
       const job = latestJob(book.source, book.id);
       const follow = state.follows.find((item) => item.source === book.source && item.book_id === book.id);
       const progress = job && job.total ? `${job.downloaded} / ${job.total} chapters ${job.refresh ? "re-archived" : "archived"}` : "Archived metadata available";
-      copy.append(node("p", "metadata", progress));
+      copy.append(node("p", "metadata", progress + (job ? jobRangeLabel(job) : "")));
 
       const actions = node("div", "book-actions");
       const badge = node("span", `badge ${job?.status === "failed" ? "failed" : follow?.enabled ? "active" : ""}`,
@@ -220,9 +252,11 @@
       });
       selection.append(checkbox, node("span", "", "Select to re-archive"));
       copy.prepend(selection);
-      const rearchive = node("button", "secondary-button", "Re-archive saved chapters");
+      const rearchive = node("button", "secondary-button", range.startChapter
+        ? `Re-archive chapters ${range.startChapter}–${range.endChapter}`
+        : invalidRange ? "Re-archive chapter range" : "Re-archive saved chapters");
       rearchive.type = "button";
-      rearchive.disabled = !eligible || queueingRefresh;
+      rearchive.disabled = !eligible || queueingRefresh || invalidRange;
       rearchive.title = !available ? "Enable this source adapter to fetch fresh chapters." : active ? "An archive job is already active for this novel." : "Fetch each saved chapter again using the current extractor.";
       rearchive.addEventListener("click", () => queueRearchive([{ source: book.source, bookId: book.id }]));
       remove.disabled = Boolean(active);
@@ -240,7 +274,7 @@
     const copy = node("div");
     copy.append(node("strong", "", titleFor(job.source, job.book_id)));
     const progress = job.total ? `${job.downloaded} / ${job.total} chapters ${job.refresh ? "re-archived" : "archived"}` : "Waiting for chapter list";
-    copy.append(node("small", "", `${progress} | updated ${formatTime(job.updated_at)}`));
+    copy.append(node("small", "", `${progress}${jobRangeLabel(job)} | updated ${formatTime(job.updated_at)}`));
     if (job.error) copy.append(node("small", "", job.error));
     const actions = node("div", "row-actions");
     const badge = node("span", `badge ${job.status === "failed" ? "failed" : ["queued", "running"].includes(job.status) ? "active" : ""}`, job.status);
@@ -363,17 +397,21 @@
 
   async function queueRearchive(items) {
     if (queueingRefresh) return;
+    let range;
+    try { range = selectedRange(); } catch (error) { showNotice(error.message); return; }
     queueingRefresh = true;
     updateRefreshSelection();
     try {
       if (items.length === 1) {
-        await api(`/v1/archive/${encodeURIComponent(items[0].source)}/${encodeURIComponent(items[0].bookId)}/refresh`, { method: "POST" });
+        await api(`/v1/archive/${encodeURIComponent(items[0].source)}/${encodeURIComponent(items[0].bookId)}/refresh`,
+          { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(range) });
       } else {
-        await api("/v1/archive/refresh", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ items }) });
+        await api("/v1/archive/refresh", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ items, ...range }) });
       }
       selectedArchives.clear();
       await refresh();
-      showNotice(`Queued re-archiving for ${items.length} novel(s). Saved chapters remain readable while fresh text is fetched. Monitor progress below; source rate limits apply.`);
+      const scope = range.startChapter ? `chapters ${range.startChapter}–${range.endChapter}` : "all saved chapters";
+      showNotice(`Queued re-archiving of ${scope} for ${items.length} novel(s). Saved copies remain readable. Monitor Active jobs; source rate limits apply.`);
     } catch (error) { showNotice(`Could not start re-archiving: ${error.message}`); }
     finally { queueingRefresh = false; renderBooks(); updateRefreshSelection(); }
   }
@@ -393,6 +431,9 @@
     });
     if (items.length) queueRearchive(items);
   });
+  rearchiveScope.addEventListener("change", updateRangeSelection);
+  rearchiveStart.addEventListener("input", updateRangeSelection);
+  rearchiveEnd.addEventListener("input", updateRangeSelection);
 
   async function stopFollowing(follow, button) {
     button.disabled = true;

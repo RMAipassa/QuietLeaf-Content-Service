@@ -149,6 +149,9 @@ input:focus, select:focus { border-color: var(--leaf); box-shadow: 0 0 0 3px rgb
 .archive-tools { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 18px; }
 .archive-tools p { margin: 0; font-size: 0.82rem; }
 .archive-tools button { flex-shrink: 0; }
+.archive-range-options { flex: 1; min-width: 0; }
+.rearchive-range { margin-top: 14px; }
+#rearchive-range-note { margin-top: 10px; }
 .archive-selection { display: inline-flex; align-items: center; gap: 8px; margin-bottom: 10px; color: var(--muted); font-size: 0.78rem; }
 .archive-selection input { width: 18px; height: 18px; padding: 0; accent-color: var(--leaf); }
 .badge { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 3px 8px; color: var(--muted); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.08em; }

@@ -46,6 +46,16 @@ class ArchiveBatch(BaseModel):
     items: list[BookSelection] = Field(min_length=1, max_length=50)
 
 
+class ChapterRange(BaseModel):
+    model_config = {"extra": "forbid"}
+    startChapter: int | None = Field(default=None, ge=1, le=100_000, strict=True)
+    endChapter: int | None = Field(default=None, ge=1, le=100_000, strict=True)
+
+
+class ArchiveRefreshBatch(ChapterRange):
+    items: list[BookSelection] = Field(min_length=1, max_length=50)
+
+
 class OperationalConfiguration(BaseModel):
     archiveConcurrency: int = Field(ge=1, le=MAX_ARCHIVE_CONCURRENCY)
     followIntervalSeconds: int = Field(
@@ -431,9 +441,9 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
                 if callable(inspect_browser):
                     item["browser"] = inspect_browser()
             source_status.append(item)
-        jobs = [{key: job[key] for key in ("id", "source", "book_id", "status", "downloaded", "total", "error", "updated_at")}
+        jobs = [{key: job[key] for key in ("id", "source", "book_id", "status", "downloaded", "total", "error", "updated_at", "range_start", "range_end")}
                 for job in (archive.jobs()[:20] if archive else [])]
-        active_jobs = [{key: job[key] for key in ("id", "source", "book_id", "status", "downloaded", "total", "error", "updated_at")}
+        active_jobs = [{key: job[key] for key in ("id", "source", "book_id", "status", "downloaded", "total", "error", "updated_at", "range_start", "range_end")}
                        for job in (archive.active_jobs() if archive else [])]
         for job in jobs + active_jobs:
             for private in sorted(private_values, key=len, reverse=True):
@@ -636,17 +646,18 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
         return job
 
     @app.post("/v1/archive/{source_id}/{book_id}/refresh", status_code=202)
-    def refresh_archived_book(source_id: str, book_id: str):
+    def refresh_archived_book(source_id: str, book_id: str, chapter_range: ChapterRange | None = None):
         storage = writable_archive()
         if source_id == "private":
             raise HTTPException(status_code=409, detail="Private library originals cannot be re-archived from a source")
         source_for(source_id)
-        job = apply(storage.enqueue, source_id, book_id, True)
+        bounds = chapter_range or ChapterRange()
+        job = apply(storage.enqueue, source_id, book_id, True, bounds.startChapter, bounds.endChapter)
         worker.wake()
         return job
 
     @app.post("/v1/archive/refresh", status_code=202)
-    def refresh_archived_batch(selection: ArchiveBatch):
+    def refresh_archived_batch(selection: ArchiveRefreshBatch):
         storage = writable_archive()
         normalized = list(dict.fromkeys(
             (apply(require_id, item.source), apply(require_id, item.bookId)) for item in selection.items
@@ -655,7 +666,7 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
             if source_id == "private":
                 raise HTTPException(status_code=409, detail="Private library originals cannot be re-archived from a source")
             source_for(source_id)
-        jobs = apply(storage.enqueue_refresh_batch, normalized)
+        jobs = apply(storage.enqueue_refresh_batch, normalized, selection.startChapter, selection.endChapter)
         worker.wake()
         return {"items": jobs, "queued": len(jobs), "phoneDownload": False}
 

@@ -60,6 +60,7 @@ class ArchiveStore:
                     status TEXT NOT NULL, total INTEGER NOT NULL DEFAULT 0,
                     downloaded INTEGER NOT NULL DEFAULT 0,
                     refresh INTEGER NOT NULL DEFAULT 0,
+                    range_start INTEGER, range_end INTEGER,
                     error TEXT NOT NULL DEFAULT '',
                     run_token TEXT NOT NULL DEFAULT '',
                     created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
@@ -96,6 +97,9 @@ class ArchiveStore:
                 db.execute("ALTER TABLE jobs ADD COLUMN run_token TEXT NOT NULL DEFAULT ''")
             if "refresh" not in job_columns:
                 db.execute("ALTER TABLE jobs ADD COLUMN refresh INTEGER NOT NULL DEFAULT 0")
+            for column in ("range_start", "range_end"):
+                if column not in job_columns:
+                    db.execute(f"ALTER TABLE jobs ADD COLUMN {column} INTEGER")
             db.execute("UPDATE jobs SET status='queued',run_token='' WHERE status='running'")
             defaults = {
                 "archive_concurrency": self.archive_concurrency,
@@ -429,42 +433,70 @@ class ArchiveStore:
                           last_error=?,failure_count=?,next_check_at=? WHERE source=? AND book_id=?""",
                        (stamp, error, stamp, error[:300], failures, stamp + interval, source, book_id))
 
-    def _enqueue(self, db, source: str, book_id: str, refresh: bool) -> dict:
+    @staticmethod
+    def _validate_refresh_range(refresh: bool, start_chapter: int | None, end_chapter: int | None) -> None:
+        if start_chapter is None and end_chapter is None:
+            return
+        if not refresh:
+            raise SourceError("Chapter ranges are only supported when re-archiving")
+        if (type(start_chapter) is not int or type(end_chapter) is not int
+                or not 1 <= start_chapter <= end_chapter <= 100_000):
+            raise SourceError("Provide both chapter bounds as whole numbers: 1 <= start <= end <= 100000")
+
+    def _enqueue(self, db, source: str, book_id: str, refresh: bool,
+                 start_chapter: int | None = None, end_chapter: int | None = None) -> dict:
+        self._validate_refresh_range(refresh, start_chapter, end_chapter)
         row = db.execute("""SELECT * FROM jobs WHERE source=? AND book_id=?
                             AND status IN ('queued','running','paused') ORDER BY created_at DESC LIMIT 1""",
                          (source, book_id)).fetchone()
         if row:
             if refresh and not row["refresh"]:
                 raise SourceError("Finish or cancel the active archive job before re-archiving this novel")
+            if refresh and (row["range_start"], row["range_end"]) != (start_chapter, end_chapter):
+                raise SourceError("A different re-archive range is already active for this novel; finish or cancel it first")
             return self._job_row(row)
         total = 0
         if refresh:
-            total = db.execute("""SELECT COUNT(*) FROM chapters WHERE source=? AND book_id=? AND body IS NOT NULL""",
-                               (source, book_id)).fetchone()[0]
+            targets_sql = "SELECT id FROM chapters WHERE source=? AND book_id=? AND body IS NOT NULL"
+            target_params = (source, book_id)
+            if start_chapter is not None:
+                indexed = db.execute("SELECT COUNT(*) FROM chapters WHERE source=? AND book_id=?",
+                                     (source, book_id)).fetchone()[0]
+                if end_chapter > indexed:
+                    raise SourceError(f"Chapter range exceeds the {indexed} indexed chapters for {source}/{book_id}")
+                # Slice the full chapter index first, so missing saved bodies do not shift positions.
+                targets_sql = """SELECT id FROM (
+                    SELECT id,body IS NOT NULL AS stored FROM chapters WHERE source=? AND book_id=?
+                    ORDER BY ordinal,id LIMIT ? OFFSET ?) WHERE stored=1"""
+                target_params = (source, book_id, end_chapter - start_chapter + 1, start_chapter - 1)
+            total = db.execute("SELECT COUNT(*) FROM (" + targets_sql + ")", target_params).fetchone()[0]
             if not total:
-                raise SourceError("This novel has no saved chapters to re-archive")
+                raise SourceError("This chapter range has no saved chapters to re-archive" if start_chapter is not None
+                                  else "This novel has no saved chapters to re-archive")
         stamp = int(time.time())
         job_id = uuid4().hex
-        db.execute("""INSERT INTO jobs(id,source,book_id,status,refresh,total,created_at,updated_at)
-                      VALUES(?,?,?,'queued',?,?,?,?)""", (job_id, source, book_id, int(refresh), total, stamp, stamp))
+        db.execute("""INSERT INTO jobs(id,source,book_id,status,refresh,total,range_start,range_end,created_at,updated_at)
+                      VALUES(?,?,?,'queued',?,?,?,?,?,?)""",
+                   (job_id, source, book_id, int(refresh), total, start_chapter, end_chapter, stamp, stamp))
         if refresh:
-            db.execute("""INSERT INTO refresh_chapters(job_id,chapter_id)
-                          SELECT ?,id FROM chapters WHERE source=? AND book_id=? AND body IS NOT NULL""",
-                       (job_id, source, book_id))
+            db.execute("INSERT INTO refresh_chapters(job_id,chapter_id) SELECT ?,id FROM (" + targets_sql + ")",
+                       (job_id, *target_params))
         return self._job_row(db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
 
-    def enqueue(self, source: str, book_id: str, refresh: bool = False) -> dict:
+    def enqueue(self, source: str, book_id: str, refresh: bool = False,
+                start_chapter: int | None = None, end_chapter: int | None = None) -> dict:
         with self.lock, self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            return self._enqueue(db, require_id(source), require_id(book_id), refresh)
+            return self._enqueue(db, require_id(source), require_id(book_id), refresh, start_chapter, end_chapter)
 
-    def enqueue_refresh_batch(self, items: list[tuple[str, str]]) -> list[dict]:
+    def enqueue_refresh_batch(self, items: list[tuple[str, str]], start_chapter: int | None = None,
+                              end_chapter: int | None = None) -> list[dict]:
         if not 1 <= len(items) <= 50:
             raise SourceError("Select between 1 and 50 novels")
         normalized = list(dict.fromkeys((require_id(source), require_id(book_id)) for source, book_id in items))
         with self.lock, self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            return [self._enqueue(db, source, book_id, True) for source, book_id in normalized]
+            return [self._enqueue(db, source, book_id, True, start_chapter, end_chapter) for source, book_id in normalized]
 
     def refresh_targets(self, job_id: str) -> list[dict]:
         with self._connect() as db:
