@@ -44,6 +44,7 @@ class WtrLabBookNotFound(SourceError):
 
 
 class WtrLabSource(HtmlSource):
+    chapter_text_mode = "http"
     HOME_PATHS = {
         "popular": ("/en/ranking/all_time", "list"),
         "completed": ("/en/novel-list?status=completed", "series"),

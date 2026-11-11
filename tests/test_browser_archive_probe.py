@@ -170,6 +170,7 @@ def test_normal_ui_verification_is_allowed_to_finish_without_a_scripted_click(mo
     transport.verification_seen = {28}
     transport.verification_completed = set()
     transport.reader_errors = {}
+    transport.active_novel_path = NOVEL_PATH
     assert asyncio.run(transport._read_chapter(28)) == story
     events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert [entry["event"] for entry in events] == ["reader_waiting_for_site_verification", "reader_verification_completed"]

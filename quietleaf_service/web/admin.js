@@ -152,6 +152,8 @@
       ["Normal check interval", `${state.health.followIntervalSeconds || 0} seconds`],
       ["Active-book interval", `${state.health.activeIntervalSeconds || 0} seconds`],
       ["Sources", state.health.sources.map((source) => source.name).join(", ") || "None"],
+      ...state.health.sources.filter((source) => state.health.sourceCapabilities?.[source.id]?.chapterTextMode)
+        .map((source) => [`${source.name} chapter mode`, state.health.sourceCapabilities[source.id].chapterTextMode]),
       ["Archive storage", state.health.archiveEnabled ? "Enabled" : "Disabled"],
     ];
     details.replaceChildren(...values.map(([label, value]) => {

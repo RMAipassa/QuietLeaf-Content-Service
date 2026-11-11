@@ -194,6 +194,34 @@ The session stays on the service and is sent only to `https://wtr-lab.com:443`, 
 
 Guest chapter 1 and the chapter-11 account-required response have been checked live. Authenticated chapter access requires your configured valid session; tests verify forwarding, expiry errors, redirect/CDN isolation, and locked-chapter handling using fixtures.
 
+### Production WTR-LAB reader UI (v0.13.0)
+
+Normal API/archive jobs can now use the tested reader UI, beyond the bounded diagnostics below. The provider ID remains `wtr-lab`, and all novels/chapters use their existing IDs. This mode has no 40/100-chapter test limit. Metadata, discovery and covers keep their HTTP implementation; their requests and the browser's actual WTR-LAB requests share the same two-second source gate. Chapter reads share one lazily started browser and serialize navigation across WTR-LAB jobs. Other providers do not use this mode.
+
+In the service's private `.env`, retain your account/authorization variables and add:
+
+```dotenv
+QUIETLEAF_WTRLAB_READER_UI=1
+# Optional: explicit executable when it is installed outside the service-account cache
+# QUIETLEAF_WTRLAB_BROWSER_PATH=/absolute/path/to/camoufox-bin
+```
+
+For AMP Python App Runner, change **App Setup Command** to:
+
+```text
+python -m pip install -e ".[browser-test]" && python -m quietleaf_service.browser_setup
+```
+
+Run **Update** and start the normal `uvicorn` module with the existing app arguments. The setup command explicitly downloads/verifies Camoufox and its model under the AMP service account; live chapter requests never initiate browser installation. Windows needs a service-accessible Python runtime. Linux also needs the browser's native dependencies and `Xvfb` installed on the host before setup. `python -m quietleaf_service.browser_setup --check` checks an existing setup without downloading.
+
+Confirm **WTR-LAB chapter mode: reader-ui** in the service console (or `sourceCapabilities.wtr-lab.chapterTextMode` in authenticated `/v1/health`) before retrying an interrupted job. Use that job's **Retry** action, not **Re-archive saved chapters**: a normal retry retains and skips its saved bodies, so a 95/335 job resumes at the first missing chapter. Browser shutdown is tied to service shutdown, and the existing job leases prevent stopped/paused work from overwriting saved chapters.
+
+### Authenticated hosted diagnostics (v0.13.0)
+
+`GET /v1/diagnostics` accepts the existing API Bearer token or admin session. It reports the actual release/Python/platform, source chapter modes, browser package/setup state, current browser activity/request/verification counts and the latest 20 archive-job checkpoints/errors. It never launches or downloads a browser, and omits cookies, passwords, tokens, environment dumps and executable/profile paths. Responses are `private, no-store`; diagnostics are unavailable on an unauthenticated deployment.
+
+This distinguishes `http` from `reader-ui` and `not-started` from setup/start errors, so a deployed service can be inspected before testing another long archive job. A configured mode alone is not proof of a successful browser launch; check setup and job/browser activity as well.
+
 ### Optional Camoufox browser probe (v0.12.2)
 
 The one-shot `quietleaf_service.browser_probe` diagnostic tests whether a real browser on the current host can render chapters **1 and 11** of *Game Arrival: 100% Drop Rate, I'm Invincible!*. It uses `QUIETLEAF_WTRLAB_COOKIE` and `QUIETLEAF_WTRLAB_ACCESS_AUTHORIZED` from the process environment or private `.env`. Only the account session token is imported into the browser; analytics and copied Cloudflare clearance cookies are excluded.

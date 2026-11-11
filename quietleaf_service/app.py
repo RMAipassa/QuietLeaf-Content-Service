@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import importlib.metadata
 import json
 import os
 import secrets
+import sys
 import tempfile
 import time
 from contextlib import asynccontextmanager
@@ -94,6 +96,10 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
             finally:
                 if worker:
                     worker.stop()
+                for source in sources:
+                    close = getattr(source, "close", None)
+                    if callable(close):
+                        await asyncio.to_thread(close)
 
     app = FastAPI(title="QuietLeaf Content API", version=__version__, docs_url=None,
                   redoc_url=None, lifespan=lifespan)
@@ -384,7 +390,10 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
                 "releaseVersion": __version__,
                 "archiveEnabled": archive is not None,
                 "privateLibraryEnabled": private_library is not None,
-                "sourceCapabilities": {source.id: {"genreSearch": bool(getattr(source, "supports_genre_search", True))} for source in sources},
+                "sourceCapabilities": {source.id: {
+                    "genreSearch": bool(getattr(source, "supports_genre_search", True)),
+                    **({"chapterTextMode": source.chapter_text_mode} if hasattr(source, "chapter_text_mode") else {}),
+                } for source in sources},
                 "privateMaxUploadBytes": private_library.max_upload_bytes if private_library else 0,
                 "archiveWorkerRunning": bool(worker and worker.is_running()),
                 "archiveConcurrency": worker.concurrency if worker else 0,
@@ -392,6 +401,47 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
                 "followIntervalSeconds": archive.poll_seconds if archive else None,
                 "activeIntervalSeconds": archive.active_poll_seconds if archive else None,
                 "sources": [{"id": s.id, "name": s.name} for s in sources]}
+
+    @app.get("/v1/diagnostics")
+    def diagnostics():
+        if not (token or admin_password):
+            raise HTTPException(status_code=403, detail="Configure API/admin authentication before inspecting diagnostics")
+        packages = {}
+        for package in ("camoufox", "playwright"):
+            try:
+                packages[package] = importlib.metadata.version(package)
+            except importlib.metadata.PackageNotFoundError:
+                packages[package] = None
+        source_status = []
+        private_values = {value for value in (token, admin_password) if value}
+        for source in sources:
+            item = {"id": source.id, "name": source.name}
+            if hasattr(source, "chapter_text_mode"):
+                item["chapterTextMode"] = source.chapter_text_mode
+                item["accountSessionConfigured"] = bool(getattr(source, "_session_cookie", ""))
+                cookie = getattr(source, "_session_cookie", "")
+                if cookie:
+                    private_values.add(cookie)
+                    private_values.update(part.strip().partition("=")[2] for part in cookie.split(";")
+                                          if len(part.strip().partition("=")[2]) >= 8)
+                item["browserState"] = getattr(source, "browser_state", "disabled")
+                from .wtrlab_browser import browser_preflight
+                item["browserSetup"] = browser_preflight(os.getenv("QUIETLEAF_WTRLAB_BROWSER_PATH", ""))
+                inspect_browser = getattr(source, "browser_diagnostics", None)
+                if callable(inspect_browser):
+                    item["browser"] = inspect_browser()
+            source_status.append(item)
+        jobs = [{key: job[key] for key in ("id", "source", "book_id", "status", "downloaded", "total", "error", "updated_at")}
+                for job in (archive.jobs()[:20] if archive else [])]
+        for job in jobs:
+            for private in sorted(private_values, key=len, reverse=True):
+                job["error"] = job["error"].replace(private, "[redacted]")
+        return JSONResponse({"releaseVersion": __version__, "pythonVersion": sys.version.split()[0],
+                             "platform": sys.platform, "sources": source_status,
+                             "browserPackages": packages,
+                             "archiveWorkerRunning": bool(worker and worker.is_running()),
+                             "activeArchiveJobs": worker.active_count() if worker else 0,
+                             "recentJobs": jobs}, headers={"Cache-Control": "private, no-store"})
 
     @app.get("/v1/search")
     def search(q: str = Query(default="", max_length=100),
@@ -689,10 +739,17 @@ def build_from_env() -> FastAPI:
             access_authorized=os.getenv("QUIETLEAF_NOVELPING_ACCESS_AUTHORIZED", "").lower() in {"1", "true", "yes"},
         ))
     if os.getenv("QUIETLEAF_ENABLE_WTRLAB", "").lower() in {"1", "true", "yes"}:
-        sources.append(WtrLabSource(
+        source_class = WtrLabSource
+        browser_options = {}
+        if os.getenv("QUIETLEAF_WTRLAB_READER_UI", "").lower() in {"1", "true", "yes"}:
+            from .wtrlab_browser import WtrLabReaderUiSource
+            source_class = WtrLabReaderUiSource
+            browser_options["browser_path"] = os.getenv("QUIETLEAF_WTRLAB_BROWSER_PATH", "")
+        sources.append(source_class(
             base_url=os.getenv("QUIETLEAF_WTRLAB_BASE_URL", "https://wtr-lab.com"),
             access_authorized=os.getenv("QUIETLEAF_WTRLAB_ACCESS_AUTHORIZED", "").lower() in {"1", "true", "yes"},
             session_cookie=os.getenv("QUIETLEAF_WTRLAB_COOKIE", ""),
+            **browser_options,
         ))
     archive_dir = Path(os.getenv("QUIETLEAF_ARCHIVE_DIR", str(Path(__file__).resolve().parent.parent / "archive")))
     archive_cap = int(os.getenv("QUIETLEAF_ARCHIVE_MAX_BYTES", str(2 * 1024 * 1024 * 1024)))

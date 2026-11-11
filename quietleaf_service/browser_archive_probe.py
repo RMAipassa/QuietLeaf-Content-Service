@@ -106,14 +106,15 @@ FETCH = """async ({url, method, body, limit, accept}) => {
 class BrowserTransport:
     """Own Playwright on one thread; synchronous workers share its request gate."""
 
-    def __init__(self, cookie: dict, browser_path: str | None, max_requests: int, *,
+    def __init__(self, cookie: dict, browser_path: str | None, max_requests: int | None, *,
                  engine: str = "camoufox", headed: bool = False, stealth: bool = False, blink_flag: bool = False,
-                 reader_ui: bool = False):
+                 reader_ui: bool = False, reserve_request=None):
         self.cookie = cookie
         self.browser_path = browser_path
         self.max_requests = max_requests
         self.engine, self.headed, self.stealth, self.blink_flag = engine, headed, stealth, blink_flag
         self.reader_ui = reader_ui
+        self.reserve_request = reserve_request
         self.ready = concurrent.futures.Future()
         self.thread = threading.Thread(target=self._run, name="wtrlab-browser", daemon=True)
         self.thread.start()
@@ -138,7 +139,7 @@ class BrowserTransport:
                 from playwright_stealth import Stealth
                 await Stealth().apply_stealth_async(self.context)
             await self.context.add_cookies([self.cookie])
-            self.gate = RequestGate(self.max_requests)
+            self.gate = RequestGate(self.max_requests, self.reserve_request)
             self.static_cache = {}
             self.static_cache_bytes = 0
             await self.context.route("**/*", self._route)
@@ -146,6 +147,8 @@ class BrowserTransport:
             self.verification_seen = set()
             self.verification_completed = set()
             self.reader_errors = {}
+            self.active_novel_path = None
+            self.reader_activity = None
             self.page.on("response", self._reader_response)
             self.page.on("response", self._cache_static_response)
             self.ready.set_result(None)
@@ -189,6 +192,9 @@ class BrowserTransport:
             payload = await response.json()
             if type(number) is not int or not isinstance(payload, dict):
                 return
+            active = getattr(self, "active_novel_path", None)
+            if active and params.get("raw_id") is not None and str(params["raw_id"]) != active.split("/")[3]:
+                return
             if payload.get("requireTurnstile") or payload.get("turnstile_required"):
                 self.verification_seen.add(number)
                 emit("reader_verification_requested", chapter=number)
@@ -197,8 +203,14 @@ class BrowserTransport:
         except Exception:
             pass
 
-    async def _read_chapter(self, number: int) -> str:
-        target = f"{NOVEL_PATH}/chapter-{number}"
+    async def _read_chapter(self, number: int, novel_path: str = NOVEL_PATH) -> str:
+        if getattr(self, "active_novel_path", None) != novel_path:
+            self.active_novel_path = novel_path
+            self.verification_seen.clear()
+            self.verification_completed.clear()
+            self.reader_errors.clear()
+        self.reader_activity = {"bookId": novel_path.split("/")[3], "chapter": number, "phase": "navigating"}
+        target = f"{novel_path}/chapter-{number}"
         if urlsplit(self.page.url).path != target:
             # Use the site's own Next link when present so its reader/verification UI runs normally.
             absolute = ORIGIN + target
@@ -221,27 +233,31 @@ class BrowserTransport:
             if error in {"account", "locked"} or state in {"account", "locked"}:
                 raise SourceError("WTR-LAB reader requires account access or chapter unlocking; job stopped")
             if state == "text":
-                if not urlsplit(self.page.url).path.startswith(NOVEL_PATH + "/chapter-"):
+                if not urlsplit(self.page.url).path.startswith(novel_path + "/chapter-"):
                     raise SourceError("Reader returned text from an unexpected novel")
                 if (number in self.verification_seen or waiting_reported) and number not in self.verification_completed:
                     emit("reader_verification_completed", chapter=number, completion="site_ui_without_scripted_clicks")
                     self.verification_completed.add(number)
+                self.reader_activity = {**self.reader_activity, "phase": "idle"}
                 return text
             if (state == "verification" or number in self.verification_seen) and not waiting_reported:
                 emit("reader_waiting_for_site_verification", chapter=number)
                 waiting_reported = True
+                self.reader_activity = {**self.reader_activity, "phase": "verifying"}
             # Let the site's widget and callback complete naturally. Never click or inject a token.
             await asyncio.sleep(2)
         raise SourceError(f"WTR-LAB reader did not complete verification/rendering for chapter {number}; saved chapters retained")
 
-    def read_chapter(self, number: int) -> str:
-        future = asyncio.run_coroutine_threadsafe(self._read_chapter(number), self.loop)
+    def read_chapter(self, number: int, novel_path: str = NOVEL_PATH) -> str:
+        future = asyncio.run_coroutine_threadsafe(self._read_chapter(number, novel_path), self.loop)
         try:
             return future.result(timeout=390)
         except SourceError:
+            self.reader_activity = {**(self.reader_activity or {}), "phase": "error"}
             raise
         except Exception:
             future.cancel()
+            self.reader_activity = {**(self.reader_activity or {}), "phase": "error"}
             raise SourceError("WTR-LAB reader navigation failed; saved chapters retained") from None
 
     async def _request(self, method: str, target: str, body: dict | None, max_bytes: int, accept: str):
@@ -264,7 +280,8 @@ class BrowserTransport:
 
     def close(self):
         if self.thread.is_alive():
-            self.loop.call_soon_threadsafe(self.stopped.set)
+            if not self.loop.is_closed():
+                self.loop.call_soon_threadsafe(self.stopped.set)
             self.thread.join(timeout=30)
 
 

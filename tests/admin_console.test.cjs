@@ -59,7 +59,8 @@ async function consoleFixture() {
       payload = {
         "/v1/health": { service: "quietleaf-content-api", version: 1, releaseVersion: "0.11.0", archiveWorkerRunning: true,
           archiveConcurrency: 3, activeArchiveJobs: 0, archiveEnabled: true, privateLibraryEnabled: false,
-          sources: [{ id: "novelping", name: "NovelPing" }, { id: "wtr-lab", name: "WTR-LAB" }] },
+          sources: [{ id: "novelping", name: "NovelPing" }, { id: "wtr-lab", name: "WTR-LAB" }],
+          sourceCapabilities: { "wtr-lab": { chapterTextMode: "reader-ui" } } },
         "/v1/archive/config": { archiveConcurrency: 3, followIntervalSeconds: 3600, activeIntervalSeconds: 1800 },
         "/v1/archive/books": { items: books, total: books.length },
         "/v1/archive/jobs": { items: jobs },
@@ -109,4 +110,9 @@ test("publication status is shown independently from archive job progress", asyn
   const { elements } = await consoleFixture();
   assert.match(elements.get("book-list").textContent, /Writer \| novelping \| Completed/);
   assert.match(elements.get("book-list").textContent, /Writer \| wtr-lab \| Ongoing/);
+});
+
+test("the service panel identifies the active WTR-LAB reader mode", async () => {
+  const { elements } = await consoleFixture();
+  assert.match(elements.get("service-details").textContent, /WTR-LAB chapter mode reader-ui/);
 });
