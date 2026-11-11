@@ -1,15 +1,17 @@
-"""Bounded real ArchiveWorker job using one authenticated Camoufox session."""
+"""Bounded real ArchiveWorker job using one authenticated browser session."""
 from __future__ import annotations
 
 import argparse
 import asyncio
 import concurrent.futures
 import hashlib
+import json
 import os
 import shutil
 import sys
 import threading
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -18,10 +20,66 @@ from dotenv import load_dotenv
 from .adapters import SourceError
 from .archive import ArchiveStore, ArchiveWorker
 from .browser_probe import NOVEL_PATH, ORIGIN, RequestGate, account_cookie, emit
-from .wtrlab import WtrLabSource
+from .content import clean_chapter_text
+from .wtrlab import GLOSSARY_MARKER, WtrLabSource
 
 
 BOOK_ID = "51691"
+
+
+def reader_state(title: str, text: str) -> str:
+    """Check actual gate screens without mistaking story dialogue for a challenge."""
+    heading = title.strip().casefold()
+    lower = text.casefold()
+    if heading.startswith(("just a moment", "attention required")):
+        return "verification"
+    if any(value in lower for value in ("ai translation requires registration", "guests can preview ai translation",
+                                        "you are not logged in!")):
+        return "account"
+    if "this chapter requires unlocking" in lower or "sign in to unlock and read" in lower:
+        return "locked"
+    if GLOSSARY_MARKER.search(text):
+        return "glossary"
+    return "text" if len(text.strip()) >= 500 else "waiting"
+
+
+@asynccontextmanager
+async def browser_backend(engine: str, path: str | None, headed: bool, blink_flag: bool):
+    if engine == "camoufox":
+        from camoufox.async_api import AsyncCamoufox
+
+        options = {"headless": False if headed else ("virtual" if sys.platform == "linux" else True)}
+        if path:
+            options["executable_path"] = path
+        async with AsyncCamoufox(**options) as browser:
+            yield browser
+    elif engine == "cloakbrowser":
+        from cloakbrowser import launch_async
+
+        options = {"headless": not headed}
+        if path:
+            options["executable_path"] = path
+        browser = await launch_async(**options)
+        try:
+            yield browser
+        finally:
+            await browser.close()
+    else:
+        from playwright.async_api import async_playwright
+
+        async with async_playwright() as playwright:
+            options = {"headless": not headed}
+            if path:
+                options["executable_path"] = path
+            if blink_flag:
+                options["args"] = ["--disable-blink-features=AutomationControlled"]
+            browser = await playwright.chromium.launch(**options)
+            try:
+                yield browser
+            finally:
+                await browser.close()
+
+
 FETCH = """async ({url, method, body, limit, accept}) => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 120000);
@@ -48,17 +106,21 @@ FETCH = """async ({url, method, body, limit, accept}) => {
 class BrowserTransport:
     """Own Playwright on one thread; synchronous workers share its request gate."""
 
-    def __init__(self, cookie: dict, browser_path: str | None, max_requests: int):
+    def __init__(self, cookie: dict, browser_path: str | None, max_requests: int, *,
+                 engine: str = "camoufox", headed: bool = False, stealth: bool = False, blink_flag: bool = False,
+                 reader_ui: bool = False):
         self.cookie = cookie
         self.browser_path = browser_path
         self.max_requests = max_requests
+        self.engine, self.headed, self.stealth, self.blink_flag = engine, headed, stealth, blink_flag
+        self.reader_ui = reader_ui
         self.ready = concurrent.futures.Future()
         self.thread = threading.Thread(target=self._run, name="wtrlab-browser", daemon=True)
         self.thread.start()
         try:
             self.ready.result(timeout=90)
         except Exception:
-            raise SourceError("Camoufox could not start under the application service account") from None
+            raise SourceError("The selected browser could not start under the application service account") from None
 
     def _run(self):
         try:
@@ -68,27 +130,126 @@ class BrowserTransport:
                 self.ready.set_exception(RuntimeError("browser_start_failed"))
 
     async def _serve(self):
-        from camoufox.async_api import AsyncCamoufox
-
-        options = {"headless": "virtual" if sys.platform == "linux" else True}
-        if self.browser_path:
-            options["executable_path"] = self.browser_path
-        async with AsyncCamoufox(**options) as browser:
+        async with browser_backend(self.engine, self.browser_path, self.headed, self.blink_flag) as browser:
             self.loop = asyncio.get_running_loop()
             self.stopped = asyncio.Event()
             self.context = await browser.new_context(service_workers="block")
+            if self.stealth:
+                from playwright_stealth import Stealth
+                await Stealth().apply_stealth_async(self.context)
             await self.context.add_cookies([self.cookie])
             self.gate = RequestGate(self.max_requests)
-            await self.context.route("**/*", self.gate.route)
+            self.static_cache = {}
+            self.static_cache_bytes = 0
+            await self.context.route("**/*", self._route)
             self.page = await self.context.new_page()
+            self.verification_seen = set()
+            self.verification_completed = set()
+            self.reader_errors = {}
+            self.page.on("response", self._reader_response)
+            self.page.on("response", self._cache_static_response)
             self.ready.set_result(None)
             await self.stopped.wait()
             await self.context.close()
+
+    async def _route(self, route):
+        cached = self.static_cache.get(route.request.url)
+        if cached is not None and route.request.method == "GET":
+            mime, body = cached
+            await route.fulfill(status=200, headers={"Content-Type": mime}, body=body)
+            return
+        await self.gate.route(route)
+
+    async def _cache_static_response(self, response):
+        url = urlsplit(response.url)
+        if (url.scheme != "https" or url.hostname != "wtr-lab.com" or url.port not in (None, 443)
+                or url.username or url.password or not url.path.startswith("/_next/static/")
+                or response.status != 200 or response.request.method != "GET"
+                or response.url in self.static_cache):
+            return
+        try:
+            headers = await response.all_headers()
+            mime = headers.get("content-type", "")
+            if ("javascript" not in mime and "css" not in mime) or "set-cookie" in headers:
+                return
+            body = await response.body()
+            if len(body) <= 2 * 1024 * 1024 and self.static_cache_bytes + len(body) <= 64 * 1024 * 1024:
+                self.static_cache[response.url] = (mime, body)
+                self.static_cache_bytes += len(body)
+        except Exception:
+            pass
+
+    async def _reader_response(self, response):
+        target = urlsplit(response.url)
+        if target.hostname != "wtr-lab.com" or target.path != "/api/reader/get":
+            return
+        try:
+            params = json.loads(response.request.post_data or "{}")
+            number = params.get("chapter_no")
+            payload = await response.json()
+            if type(number) is not int or not isinstance(payload, dict):
+                return
+            if payload.get("requireTurnstile") or payload.get("turnstile_required"):
+                self.verification_seen.add(number)
+                emit("reader_verification_requested", chapter=number)
+            if payload.get("code") in (1401, "1401", "CHAPTER_LOCKED"):
+                self.reader_errors[number] = "account" if str(payload["code"]) == "1401" else "locked"
+        except Exception:
+            pass
+
+    async def _read_chapter(self, number: int) -> str:
+        target = f"{NOVEL_PATH}/chapter-{number}"
+        if urlsplit(self.page.url).path != target:
+            # Use the site's own Next link when present so its reader/verification UI runs normally.
+            absolute = ORIGIN + target
+            links = self.page.locator(f'a[href="{target}"]:visible, a[href^="{target}?"]:visible, '
+                                      f'a[href="{absolute}"]:visible, a[href^="{absolute}?"]:visible')
+            if await links.count():
+                emit("reader_navigation", chapter=number, method="site_link")
+                await links.first.click(timeout=15_000)
+            else:
+                emit("reader_navigation", chapter=number, method="page_navigation")
+                await self.page.goto(ORIGIN + target, wait_until="domcontentloaded", timeout=180_000)
+        deadline = time.monotonic() + 180
+        waiting_reported = False
+        while time.monotonic() < deadline:
+            if urlsplit(self.page.url).hostname != "wtr-lab.com":
+                raise SourceError("Reader navigated away from WTR-LAB")
+            text = "\n\n".join(await self.page.locator(f"#chapter-{number} .chapter-body").all_inner_texts())
+            state = reader_state(await self.page.title(), text)
+            error = self.reader_errors.get(number)
+            if error in {"account", "locked"} or state in {"account", "locked"}:
+                raise SourceError("WTR-LAB reader requires account access or chapter unlocking; job stopped")
+            if state == "text":
+                if not urlsplit(self.page.url).path.startswith(NOVEL_PATH + "/chapter-"):
+                    raise SourceError("Reader returned text from an unexpected novel")
+                if (number in self.verification_seen or waiting_reported) and number not in self.verification_completed:
+                    emit("reader_verification_completed", chapter=number, completion="site_ui_without_scripted_clicks")
+                    self.verification_completed.add(number)
+                return text
+            if (state == "verification" or number in self.verification_seen) and not waiting_reported:
+                emit("reader_waiting_for_site_verification", chapter=number)
+                waiting_reported = True
+            # Let the site's widget and callback complete naturally. Never click or inject a token.
+            await asyncio.sleep(2)
+        raise SourceError(f"WTR-LAB reader did not complete verification/rendering for chapter {number}; saved chapters retained")
+
+    def read_chapter(self, number: int) -> str:
+        future = asyncio.run_coroutine_threadsafe(self._read_chapter(number), self.loop)
+        try:
+            return future.result(timeout=390)
+        except SourceError:
+            raise
+        except Exception:
+            future.cancel()
+            raise SourceError("WTR-LAB reader navigation failed; saved chapters retained") from None
 
     async def _request(self, method: str, target: str, body: dict | None, max_bytes: int, accept: str):
         if self.page.url == "about:blank":
             emit("browser_bootstrap", chapter=1)
             await self.page.goto(ORIGIN + NOVEL_PATH + "/chapter-1", wait_until="domcontentloaded", timeout=180_000)
+            if self.reader_ui:
+                await self._read_chapter(1)
         if urlsplit(self.page.url).hostname != "wtr-lab.com":
             raise SourceError("WTR-LAB browser navigated away from its configured origin")
         return await self.page.evaluate(FETCH, {"url": target, "method": method, "body": body, "limit": max_bytes, "accept": accept})
@@ -96,7 +257,7 @@ class BrowserTransport:
     def request(self, method: str, target: str, body: dict | None, max_bytes: int, accept: str) -> dict:
         future = asyncio.run_coroutine_threadsafe(self._request(method, target, body, max_bytes, accept), self.loop)
         try:
-            return future.result(timeout=330)
+            return future.result(timeout=390 if self.reader_ui else 330)
         except Exception:
             future.cancel()
             raise SourceError("WTR-LAB browser request failed or timed out; saved chapters were retained") from None
@@ -111,12 +272,16 @@ class BrowserArchiveSource(WtrLabSource):
     """Existing WTR contracts/glossary over browser fetch, bounded to a test range."""
 
     def __init__(self, session_cookie: str, chapter_limit: int, *, browser_path: str | None = None,
-                 transport=None):
+                 transport=None, reader_ui: bool = False, engine: str = "camoufox", headed: bool = False,
+                 stealth: bool = False, blink_flag: bool = False, chapter_delay: float = 0):
         cookie = account_cookie(session_cookie)
         super().__init__(access_authorized=True, session_cookie=f"{cookie['name']}={cookie['value']}")
         self.chapter_limit = chapter_limit
         self._remember_slug(BOOK_ID, NOVEL_PATH.rsplit("/", 1)[1])
-        self.browser = transport or BrowserTransport(cookie, browser_path, 200 + chapter_limit * 8)
+        self.browser = transport or BrowserTransport(cookie, browser_path, 200 + chapter_limit * 30,
+                                                      engine=engine, headed=headed, stealth=stealth, blink_flag=blink_flag,
+                                                      reader_ui=reader_ui)
+        self.reader_ui, self.chapter_delay = reader_ui, chapter_delay
         self.last_attempted_chapter = None
         self.fetched_chapters = []
 
@@ -156,7 +321,16 @@ class BrowserArchiveSource(WtrLabSource):
 
     def text(self, book_id: str, chapter_id: str) -> str:
         self.last_attempted_chapter = chapter_id
-        text = super().text(book_id, chapter_id)
+        if self.chapter_delay:
+            time.sleep(self.chapter_delay)
+        if self.reader_ui:
+            if book_id != BOOK_ID or not chapter_id.startswith("chapter-"):
+                raise SourceError("Unsupported reader UI test chapter")
+            with self._lock:
+                text = self.browser.read_chapter(int(chapter_id.removeprefix("chapter-")))
+            text = clean_chapter_text(self.id, text)
+        else:
+            text = super().text(book_id, chapter_id)
         self.fetched_chapters.append(chapter_id)
         return text
 
@@ -202,9 +376,19 @@ def main(argv=None) -> int:
     parser.add_argument("--timeout", type=int, default=900)
     parser.add_argument("--browser-path")
     parser.add_argument("--resume", action="store_true", help="Explicitly resume an existing test archive/checkpoint")
+    parser.add_argument("--reader-ui", action="store_true", help="Read rendered chapters through the normal site UI")
+    parser.add_argument("--engine", choices=("camoufox", "chromium", "cloakbrowser"), default="camoufox")
+    parser.add_argument("--headed", action="store_true")
+    parser.add_argument("--stealth", action="store_true", help="Apply playwright-stealth to plain Chromium only")
+    parser.add_argument("--blink-flag", action="store_true", help="Set AutomationControlled flag on plain Chromium only")
+    parser.add_argument("--chapter-delay", type=float, default=0, help="Additional delay before each chapter (0–60 seconds)")
     args = parser.parse_args(argv)
     if not 1 <= args.chapters <= 100 or not 60 <= args.timeout <= 3600:
         parser.error("Use 1–100 chapters and a 60–3600 second timeout")
+    if not 0 <= args.chapter_delay <= 60:
+        parser.error("--chapter-delay must be between 0 and 60")
+    if (args.stealth or args.blink_flag) and args.engine != "chromium":
+        parser.error("Stealth/AutomationControlled options apply only to the plain Chromium comparison")
     load_dotenv(Path.cwd() / ".env", override=False)
     root = Path(args.archive_dir).resolve()
     if not root.name.startswith("camoufox-archive-test"):
@@ -215,11 +399,16 @@ def main(argv=None) -> int:
     try:
         if os.getenv("QUIETLEAF_WTRLAB_ACCESS_AUTHORIZED", "").lower() not in {"1", "true", "yes"}:
             raise SourceError("Explicit WTR-LAB source authorization is required")
-        if sys.platform == "linux" and not shutil.which("Xvfb"):
+        if sys.platform == "linux" and args.engine == "camoufox" and not args.headed and not shutil.which("Xvfb"):
             raise SourceError("Install Xvfb on the AMP host before running this test")
-        emit("archive_probe_starting", chapters=args.chapters, platform=sys.platform)
+        if args.engine == "cloakbrowser" and not os.getenv("CLOAKBROWSER_LICENSE_KEY"):
+            raise SourceError("Set your CloakBrowser license key privately in CLOAKBROWSER_LICENSE_KEY")
+        emit("archive_probe_starting", chapters=args.chapters, platform=sys.platform, engine=args.engine,
+             reader_ui=args.reader_ui, headed=args.headed, stealth=args.stealth, chapter_delay=args.chapter_delay)
         source = BrowserArchiveSource(os.getenv("QUIETLEAF_WTRLAB_COOKIE", ""), args.chapters,
-                                      browser_path=args.browser_path)
+                                      browser_path=args.browser_path, reader_ui=args.reader_ui, engine=args.engine,
+                                      headed=args.headed, stealth=args.stealth, blink_flag=args.blink_flag,
+                                      chapter_delay=args.chapter_delay)
         store = ArchiveStore(root)
         job = run_job(store, source, args.timeout)
         texts = [store.text(source.id, BOOK_ID, f"chapter-{number}") or "" for number in range(1, args.chapters + 1)]
@@ -229,7 +418,9 @@ def main(argv=None) -> int:
         success = job["status"] == "completed" and job["downloaded"] == saved == distinct == args.chapters and minimum >= 500
         emit("archive_probe_complete", success=success, saved_chapters=saved, job_status=job["status"],
              fetched_this_run=len(source.fetched_chapters), last_attempted=source.last_attempted_chapter,
-             distinct_chapters=distinct, min_characters=minimum)
+             distinct_chapters=distinct, min_characters=minimum,
+             verification_requested=len(getattr(source.browser, "verification_seen", set())),
+             verification_completed=len(getattr(source.browser, "verification_completed", set())))
         return 0 if success else 1
     except (SourceError, ValueError) as exc:
         # Browser failures are converted to fixed messages by the transport above.

@@ -227,6 +227,30 @@ Progress is logged only after the worker's durable job state changes. A verifica
 
 **Observed live result, 2026-11-10:** In a Windows AMP 2.8.0.10 service-account run with Camoufox 0.5.9, the 40-chapter job saved chapters **1–27**, then WTR-LAB requested interactive verification for **chapter 28**. The job stopped as failed with its 27/40 checkpoint intact. A read-only audit confirmed 27 distinct chapter bodies, 5,753–12,125 characters each, zero unresolved glossary markers, and no saved chapter-28 challenge response. This reproduces the sustained-download limitation: Camoufox browser transport alone does not eliminate WTR-LAB's periodic verification requirement.
 
+### Normal reader UI and automatic verification experiment (v0.12.4)
+
+The earlier archive test fetched chapter APIs from a browser parked on chapter 1. It stopped when verification was requested, without running that chapter's normal reader UI. `--reader-ui` navigates the real reader, lets the site's own verification widget/callback run, waits for actual prose in the requested chapter container, and archives that rendered text through the same worker.
+
+```bash
+python -m quietleaf_service.browser_archive_probe \
+  --archive-dir ./camoufox-archive-test-ui-40 --chapters 40 \
+  --timeout 1800 --reader-ui
+```
+
+`reader_verification_requested`, `reader_waiting_for_site_verification`, and `reader_verification_completed` events distinguish encountering a challenge from the site completing it automatically. The experiment does not click a CAPTCHA, extract/inject its tokens, or use a solving service. If the site does not complete verification/rendering within three minutes for a chapter, the job stops with its existing checkpoint retained.
+
+Playwright routing disables its normal HTTP cache. The diagnostic therefore keeps a bounded, in-memory cache of **public** WTR-LAB `/_next/static/` JavaScript/CSS responses (maximum 64 MiB, no `Set-Cookie`). Chapter/API responses and Cloudflare challenge resources are never cached. Actual WTR-LAB network requests retain the two-second gate. `--chapter-delay 10` can add ten seconds before each chapter for a separately paced comparison; its default is zero.
+
+Camoufox already uses Playwright. Optional engine comparisons are selected explicitly:
+
+- **Plain Playwright Chromium:** install `.[browser-chromium-test]`, install its Chromium binary with `python -m playwright install chromium`, and use `--engine chromium`. `--blink-flag` adds `--disable-blink-features=AutomationControlled`; `--stealth` applies `playwright-stealth`. These switches are rejected for Camoufox/CloakBrowser to avoid mixing browser-specific patches.
+- **CloakBrowser:** install `.[browser-cloak-test]`, configure your own current CloakBrowser license in private `CLOAKBROWSER_LICENSE_KEY`, and use `--engine cloakbrowser`. Its current binary requires its own license key, including the free tier. The WTR-LAB account session is a separate credential.
+- `--headed` requests a visible browser; a service host needs a working desktop/display for that mode. Linux can supply a virtual display. Windows AMP's headless service-account mode and an interactive user's headed browser are distinct environments.
+
+These comparison options are diagnostic, not guarantees of site acceptance. Use a fresh output directory for each comparison and compare verification events as well as completed chapter counts.
+
+**Observed live result, 2026-11-11:** The normal reader UI automatically completed verification on chapters **1, 2 and 3** in a Windows AMP service-account preflight, without scripted CAPTCHA clicks or token injection. That preflight was paused at 4 chapters to correct the routing-disabled static cache. A separate fresh UI-mode job with public-static caching then completed **40/40 consecutive chapters**, all fetched in that run, with 40 distinct saved bodies (5,718–12,048 characters), zero unresolved glossary markers and zero verification-screen matches. No additional reader-verification requests were logged in that fresh 40-chapter run. It used Camoufox/Playwright in headless service mode, no extra stealth plugin and no added chapter delay; the two-second network gate remained active. The full-page UI run took about 29 minutes. This demonstrates the site's automatic UI flow and sustained archiving on that host; it does not isolate request speed as the cause of the earlier API-only failure.
+
 The adapter rejects page, API, and reader redirects, untrusted content and cover hosts, oversized responses, and Turnstile challenges. Covers permit only WTR-LAB's single HTTPS image-proxy handoff to the allowlisted `img.wtr-lab.com` host; further redirects remain blocked. It does not bypass authentication, CAPTCHA, paywalls, or other access controls. WTR-LAB is then exposed through Android's existing **My content service** discovery source; no separate Android provider configuration is required. A full archive can take substantial time because each reader initialization and signed-content request remains subject to the shared two-second interval.
 
 NovelBin is not preconfigured. It can use the generic adapter when you have a workable, permissible source and stable HTML. An adapter configuration does not grant rights to a novel.
