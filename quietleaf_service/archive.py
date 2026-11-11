@@ -479,10 +479,18 @@ class ArchiveStore:
             row = db.execute("SELECT * FROM jobs WHERE id=?", (require_id(job_id),)).fetchone()
         return self._job_row(row)
 
-    def jobs(self):
+    def jobs(self, history_only: bool = False):
+        where = " WHERE status NOT IN ('queued','running','paused')" if history_only else ""
         with self._connect() as db:
             return [self._job_row(row) for row in db.execute(
-                "SELECT * FROM jobs ORDER BY created_at DESC,rowid DESC LIMIT 100").fetchall()]
+                "SELECT * FROM jobs" + where + " ORDER BY updated_at DESC,created_at DESC,rowid DESC LIMIT 100").fetchall()]
+
+    def active_jobs(self):
+        with self._connect() as db:
+            return [self._job_row(row) for row in db.execute("""SELECT * FROM jobs
+                WHERE status IN ('queued','running','paused')
+                ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END,
+                         created_at,rowid""").fetchall()]
 
     def next_job(self, excluding: set[tuple[str, str]] | None = None):
         excluded = excluding or set()

@@ -147,6 +147,7 @@ class BrowserTransport:
             self.verification_seen = set()
             self.verification_completed = set()
             self.reader_errors = {}
+            self.reader_responses = {}
             self.active_novel_path = None
             self.reader_activity = None
             self.page.on("response", self._reader_response)
@@ -195,22 +196,39 @@ class BrowserTransport:
             active = getattr(self, "active_novel_path", None)
             if active and params.get("raw_id") is not None and str(params["raw_id"]) != active.split("/")[3]:
                 return
+            code = payload.get("code")
+            safe_code = (str(code) if type(code) is int else code
+                         if isinstance(code, str) and len(code) <= 64 and code.isupper()
+                         and code.replace("_", "").isalnum() else None)
+            self.reader_responses[number] = {"httpStatus": response.status, "success": payload.get("success") is True,
+                                             "code": safe_code, "contentProvided": bool(payload.get("content_url"))}
+            if payload.get("success") is True:
+                self.reader_errors.pop(number, None)
             if payload.get("requireTurnstile") or payload.get("turnstile_required"):
                 self.verification_seen.add(number)
                 emit("reader_verification_requested", chapter=number)
             if payload.get("code") in (1401, "1401", "CHAPTER_LOCKED"):
                 self.reader_errors[number] = "account" if str(payload["code"]) == "1401" else "locked"
+            if payload.get("code") in {"CHAPTER_NOT_RELEASED", "CHAPTER_NOT_CRAWLED"}:
+                self.reader_errors[number] = "unavailable"
         except Exception:
             pass
 
     async def _read_chapter(self, number: int, novel_path: str = NOVEL_PATH) -> str:
+        previous_error = (getattr(self, "reader_activity", None) or {}).get("phase") == "error"
         if getattr(self, "active_novel_path", None) != novel_path:
             self.active_novel_path = novel_path
             self.verification_seen.clear()
             self.verification_completed.clear()
             self.reader_errors.clear()
+            getattr(self, "reader_responses", {}).clear()
         self.reader_activity = {"bookId": novel_path.split("/")[3], "chapter": number, "phase": "navigating"}
         target = f"{novel_path}/chapter-{number}"
+        if previous_error and urlsplit(self.page.url).path == target:
+            self.reader_errors.pop(number, None)
+            getattr(self, "reader_responses", {}).pop(number, None)
+            emit("reader_navigation", chapter=number, method="retry_reload")
+            await self.page.reload(wait_until="domcontentloaded", timeout=180_000)
         if urlsplit(self.page.url).path != target:
             # Use the site's own Next link when present so its reader/verification UI runs normally.
             absolute = ORIGIN + target
@@ -223,15 +241,23 @@ class BrowserTransport:
                 emit("reader_navigation", chapter=number, method="page_navigation")
                 await self.page.goto(ORIGIN + target, wait_until="domcontentloaded", timeout=180_000)
         deadline = time.monotonic() + 180
+        started, reloaded = time.monotonic(), False
         waiting_reported = False
         while time.monotonic() < deadline:
             if urlsplit(self.page.url).hostname != "wtr-lab.com":
                 raise SourceError("Reader navigated away from WTR-LAB")
-            text = "\n\n".join(await self.page.locator(f"#chapter-{number} .chapter-body").all_inner_texts())
+            chunks = await self.page.locator(f"#chapter-{number} .chapter-body").all_inner_texts()
+            text = "\n\n".join(chunks)
             state = reader_state(await self.page.title(), text)
             error = self.reader_errors.get(number)
+            frames = sum(urlsplit(frame.url).hostname == "challenges.cloudflare.com" for frame in getattr(self.page, "frames", []))
+            self.reader_activity = {**self.reader_activity, "renderState": state, "bodyCharacters": len(text),
+                                    "chapterContainers": len(chunks), "verificationFrames": frames,
+                                    "readerResponse": dict(getattr(self, "reader_responses", {}).get(number, {}))}
             if error in {"account", "locked"} or state in {"account", "locked"}:
                 raise SourceError("WTR-LAB reader requires account access or chapter unlocking; job stopped")
+            if error == "unavailable":
+                raise SourceError(f"WTR-LAB chapter {number} is waiting for translation or crawling; saved chapters retained")
             if state == "text":
                 if not urlsplit(self.page.url).path.startswith(novel_path + "/chapter-"):
                     raise SourceError("Reader returned text from an unexpected novel")
@@ -244,6 +270,13 @@ class BrowserTransport:
                 emit("reader_waiting_for_site_verification", chapter=number)
                 waiting_reported = True
                 self.reader_activity = {**self.reader_activity, "phase": "verifying"}
+            if (not reloaded and state == "waiting" and number not in self.verification_seen
+                    and not frames and not error and time.monotonic() - started >= 60):
+                # Recover one stalled render with a normal refresh, never refresh a pending challenge.
+                reloaded = True
+                self.reader_activity = {**self.reader_activity, "phase": "reloading"}
+                emit("reader_reloading_stalled_page", chapter=number)
+                await self.page.reload(wait_until="domcontentloaded", timeout=180_000)
             # Let the site's widget and callback complete naturally. Never click or inject a token.
             await asyncio.sleep(2)
         raise SourceError(f"WTR-LAB reader did not complete verification/rendering for chapter {number}; saved chapters retained")
@@ -251,7 +284,7 @@ class BrowserTransport:
     def read_chapter(self, number: int, novel_path: str = NOVEL_PATH) -> str:
         future = asyncio.run_coroutine_threadsafe(self._read_chapter(number, novel_path), self.loop)
         try:
-            return future.result(timeout=390)
+            return future.result(timeout=600)
         except SourceError:
             self.reader_activity = {**(self.reader_activity or {}), "phase": "error"}
             raise

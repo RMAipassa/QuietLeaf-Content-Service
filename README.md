@@ -222,6 +222,10 @@ Confirm **WTR-LAB chapter mode: reader-ui** in the service console (or `sourceCa
 
 This distinguishes `http` from `reader-ui` and `not-started` from setup/start errors, so a deployed service can be inspected before testing another long archive job. A configured mode alone is not proof of a successful browser launch; check setup and job/browser activity as well.
 
+Service v0.13.1 includes safe per-reader snapshots: render state, body character/container counts, challenge-frame count and a bounded reader response code/status/content-present flag. Page text and verification tokens are omitted. A stalled render without a pending challenge gets at most one normal refresh after a minute; a pending verification is waited for rather than refreshed. Explicitly retrying a previously failed chapter refreshes its stale page instead of waiting on the same frozen DOM. Translation/crawling-unavailable responses are reported separately from verification/rendering timeouts.
+
+The console also has a dedicated **Active jobs** panel directly below its summary. Queued, running and paused jobs come from authenticated `GET /v1/archive/jobs/active` and are independent of the recent-history limit. The separate history panel uses `GET /v1/archive/jobs?history_only=true` and shows the latest finished/failed jobs by their **last update**, so an old retried job remains visible when it finishes. Diagnostics includes an `activeJobs` collection too. Pause/resume/cancel controls and saved-novel progress use the active list even when those jobs are older than 100 history entries.
+
 ### Optional Camoufox browser probe (v0.12.2)
 
 The one-shot `quietleaf_service.browser_probe` diagnostic tests whether a real browser on the current host can render chapters **1 and 11** of *Game Arrival: 100% Drop Rate, I'm Invincible!*. It uses `QUIETLEAF_WTRLAB_COOKIE` and `QUIETLEAF_WTRLAB_ACCESS_AUTHORIZED` from the process environment or private `.env`. Only the account session token is imported into the browser; analytics and copied Cloudflare clearance cookies are excluded.

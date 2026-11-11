@@ -231,4 +231,6 @@ def test_reader_state_is_isolated_when_switching_novels():
     transport.reader_errors = {96: "locked"}
     assert asyncio.run(transport._read_chapter(96, path)) == story
     assert transport.reader_errors == {} and transport.verification_seen == set()
-    assert transport.reader_activity == {"bookId": "2", "chapter": 96, "phase": "idle"}
+    assert {k: transport.reader_activity[k] for k in ("bookId", "chapter", "phase")} == {
+        "bookId": "2", "chapter": 96, "phase": "idle"}
+    assert transport.reader_activity["bodyCharacters"] == len(story)

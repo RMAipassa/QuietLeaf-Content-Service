@@ -32,7 +32,7 @@ function descendants(root) { return [root, ...root.children.flatMap(descendants)
 function button(root, label) { return descendants(root).find((item) => item.tagName === "BUTTON" && item.textContent === label); }
 async function idle() { await new Promise((resolve) => setImmediate(resolve)); }
 
-async function consoleFixture() {
+async function consoleFixture(initialJobs = []) {
   const html = fs.readFileSync(path.join(__dirname, "../quietleaf_service/web/index.html"), "utf8");
   const elements = new Map([...html.matchAll(/<([a-z][\w-]*)\b[^>]*\bid="([^"]+)"/gi)].map((match) => [match[2], new Element(match[1])]));
   const requests = [];
@@ -40,7 +40,7 @@ async function consoleFixture() {
     { source: "novelping", id: "first", title: "First Book", author: "Writer", publicationStatus: "completed" },
     { source: "wtr-lab", id: "second", title: "Second Book", author: "Writer", publicationStatus: "ongoing" },
   ];
-  const jobs = [];
+  const jobs = initialJobs.map((job) => ({ ...job }));
   const fetch = async (url, options = {}) => {
     const method = options.method || "GET";
     requests.push({ url, method, headers: new Headers(options.headers || {}), body: options.body });
@@ -63,7 +63,8 @@ async function consoleFixture() {
           sourceCapabilities: { "wtr-lab": { chapterTextMode: "reader-ui" } } },
         "/v1/archive/config": { archiveConcurrency: 3, followIntervalSeconds: 3600, activeIntervalSeconds: 1800 },
         "/v1/archive/books": { items: books, total: books.length },
-        "/v1/archive/jobs": { items: jobs },
+        "/v1/archive/jobs?history_only=true": { items: jobs.filter((job) => !["queued", "running", "paused"].includes(job.status)) },
+        "/v1/archive/jobs/active": { items: jobs.filter((job) => ["queued", "running", "paused"].includes(job.status)) },
         "/v1/archive/follows": { items: [] },
       }[url];
     }
@@ -86,9 +87,9 @@ test("a novel's re-archive button queues a refresh and exposes progress and paus
   const queued = requests.find((item) => item.method === "POST");
   assert.equal(queued.url, "/v1/archive/novelping/first/refresh");
   assert.equal(queued.headers.get("X-QuietLeaf-Admin"), "1");
-  await button(elements.get("job-list"), "Pause").fire("click");
-  assert.match(elements.get("job-list").textContent, /paused/);
-  assert.ok(button(elements.get("job-list"), "Resume"));
+  await button(elements.get("active-job-list"), "Pause").fire("click");
+  assert.match(elements.get("active-job-list").textContent, /paused/);
+  assert.ok(button(elements.get("active-job-list"), "Resume"));
 });
 
 test("selected novels use the batch refresh endpoint and clear their selection", async () => {
@@ -115,4 +116,20 @@ test("publication status is shown independently from archive job progress", asyn
 test("the service panel identifies the active WTR-LAB reader mode", async () => {
   const { elements } = await consoleFixture();
   assert.match(elements.get("service-details").textContent, /WTR-LAB chapter mode reader-ui/);
+});
+
+test("an old running job stays visible separately from a long recent history", async () => {
+  const history = Array.from({ length: 30 }, (_, index) => ({
+    id: `history-${index}`, source: "novelping", book_id: "first", status: "completed",
+    total: 10, downloaded: 10, updated_at: 100 + index,
+  }));
+  const old = { id: "old-running", source: "wtr-lab", book_id: "second", status: "running",
+    total: 335, downloaded: 95, updated_at: 1 };
+  const { elements } = await consoleFixture([...history, old]);
+  assert.match(elements.get("active-job-list").textContent, /Second Book.*95 \/ 335/);
+  assert.equal(elements.get("active-job-count").textContent, "1");
+  assert.doesNotMatch(elements.get("job-list").textContent, /Second Book/);
+  assert.match(elements.get("book-list").textContent, /95 \/ 335/);
+  await button(elements.get("active-job-list"), "Pause").fire("click");
+  assert.ok(button(elements.get("active-job-list"), "Resume"));
 });

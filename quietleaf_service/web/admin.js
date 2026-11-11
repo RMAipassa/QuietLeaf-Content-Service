@@ -30,7 +30,7 @@
   let refreshing = false;
   let configurationDirty = false;
   let configurationRevision = 0;
-  let state = { health: null, configuration: null, books: [], booksTotal: 0, jobs: [], follows: [] };
+  let state = { health: null, configuration: null, books: [], booksTotal: 0, jobs: [], activeJobs: [], follows: [] };
 
   function node(tag, className = "", text = "") {
     const item = document.createElement(tag);
@@ -53,7 +53,7 @@
     authenticated = false;
     selectedArchives.clear();
     updateRefreshSelection();
-    state = { health: null, configuration: null, books: [], booksTotal: 0, jobs: [], follows: [] };
+    state = { health: null, configuration: null, books: [], booksTotal: 0, jobs: [], activeJobs: [], follows: [] };
     configurationDirty = false;
     window.clearInterval(timer);
     timer = null;
@@ -130,7 +130,7 @@
   }
 
   function renderSummary() {
-    const active = state.jobs.filter((job) => ["queued", "running", "paused"].includes(job.status));
+    const active = state.activeJobs;
     const enabledFollows = state.follows.filter((follow) => Number(follow.enabled) === 1);
     byId("metric-service").textContent = state.health.archiveWorkerRunning ? "Online" : "Idle";
     byId("metric-version").textContent = `Release ${state.health.releaseVersion || "unknown"}`;
@@ -235,40 +235,43 @@
     updateRefreshSelection();
   }
 
-  function renderJobs() {
-    const list = byId("job-list");
-    if (!state.jobs.length) {
-      list.replaceChildren(node("p", "empty-state", "No archive jobs have run yet."));
-      return;
+  function jobRow(job) {
+    const row = node("div", "compact-row");
+    const copy = node("div");
+    copy.append(node("strong", "", titleFor(job.source, job.book_id)));
+    const progress = job.total ? `${job.downloaded} / ${job.total} chapters ${job.refresh ? "re-archived" : "archived"}` : "Waiting for chapter list";
+    copy.append(node("small", "", `${progress} | updated ${formatTime(job.updated_at)}`));
+    if (job.error) copy.append(node("small", "", job.error));
+    const actions = node("div", "row-actions");
+    const badge = node("span", `badge ${job.status === "failed" ? "failed" : ["queued", "running"].includes(job.status) ? "active" : ""}`, job.status);
+    actions.append(badge);
+    const controls = job.status === "paused" ? [["resume", "Resume"], ["cancel", "Cancel"]]
+      : job.status === "failed" ? [["retry", "Retry"], ["cancel", "Cancel"]]
+      : ["queued", "running"].includes(job.status) ? [["pause", "Pause"], ["cancel", "Cancel"]] : [];
+    for (const [action, label] of controls) {
+      const button = node("button", "secondary-button", label);
+      button.type = "button";
+      button.addEventListener("click", () => controlJob(job, action, button));
+      actions.append(button);
     }
-    list.replaceChildren(...state.jobs.slice(0, 12).map((job) => {
-      const row = node("div", "compact-row");
-      const copy = node("div");
-      copy.append(node("strong", "", titleFor(job.source, job.book_id)));
-      const progress = job.total ? `${job.downloaded} / ${job.total} chapters ${job.refresh ? "re-archived" : "archived"}` : "Waiting for chapter list";
-      copy.append(node("small", "", `${progress} | updated ${formatTime(job.updated_at)}`));
-      if (job.error) copy.append(node("small", "", job.error));
-      const actions = node("div", "row-actions");
-      const badge = node("span", `badge ${job.status === "failed" ? "failed" : ["queued", "running"].includes(job.status) ? "active" : ""}`, job.status);
-      actions.append(badge);
-      const controls = job.status === "paused" ? [["resume", "Resume"], ["cancel", "Cancel"]]
-        : job.status === "failed" ? [["retry", "Retry"], ["cancel", "Cancel"]]
-        : ["queued", "running"].includes(job.status) ? [["pause", "Pause"], ["cancel", "Cancel"]] : [];
-      for (const [action, label] of controls) {
-        const button = node("button", "secondary-button", label);
-        button.type = "button";
-        button.addEventListener("click", () => controlJob(job, action, button));
-        actions.append(button);
-      }
-      const archived = state.books.some((book) => book.source === job.source && book.id === job.book_id);
-      if (!archived && ["failed", "canceled", "completed"].includes(job.status)) {
-        const clear = node("button", "secondary-button", "Clear");
-        clear.addEventListener("click", () => clearOrphanedJob(job));
-        actions.append(clear);
-      }
-      row.append(copy, actions);
-      return row;
-    }));
+    const archived = state.books.some((book) => book.source === job.source && book.id === job.book_id);
+    if (!archived && ["failed", "canceled", "completed"].includes(job.status)) {
+      const clear = node("button", "secondary-button", "Clear");
+      clear.addEventListener("click", () => clearOrphanedJob(job));
+      actions.append(clear);
+    }
+    row.append(copy, actions);
+    return row;
+  }
+
+  function renderJobs() {
+    const active = state.activeJobs;
+    byId("active-job-count").textContent = String(active.length);
+    byId("active-job-list").replaceChildren(...(active.length ? active.map(jobRow)
+      : [node("p", "empty-state", "No active archive jobs.")]));
+    const history = state.jobs.filter((job) => !["queued", "running", "paused"].includes(job.status)).slice(0, 12);
+    byId("job-list").replaceChildren(...(history.length ? history.map(jobRow)
+      : [node("p", "empty-state", "No finished archive jobs yet.")]));
   }
 
   function renderFollows() {
@@ -314,9 +317,9 @@
     refreshButton.disabled = true;
     showNotice("");
     try {
-      const [health, configuration, books, jobs, follows] = await Promise.all([
+      const [health, configuration, books, jobs, activeJobs, follows] = await Promise.all([
         api("/v1/health"), api("/v1/archive/config"), api("/v1/archive/books"),
-        api("/v1/archive/jobs"), api("/v1/archive/follows"),
+        api("/v1/archive/jobs?history_only=true"), api("/v1/archive/jobs/active"), api("/v1/archive/follows"),
       ]);
       const privateBooks = health.privateLibraryEnabled
         ? await api(`/v1/private/books?q=${encodeURIComponent(privateFilter.value.trim())}`)
@@ -329,7 +332,8 @@
           : state.configuration,
         books: books.items,
         booksTotal: Number(books.total ?? books.items.length),
-        jobs: jobs.items,
+        jobs: [...activeJobs.items, ...jobs.items.filter((job) => !activeJobs.items.some((active) => active.id === job.id))],
+        activeJobs: activeJobs.items,
         follows: follows.items,
       };
       render();

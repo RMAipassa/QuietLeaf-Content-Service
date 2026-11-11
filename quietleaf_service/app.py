@@ -433,7 +433,9 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
             source_status.append(item)
         jobs = [{key: job[key] for key in ("id", "source", "book_id", "status", "downloaded", "total", "error", "updated_at")}
                 for job in (archive.jobs()[:20] if archive else [])]
-        for job in jobs:
+        active_jobs = [{key: job[key] for key in ("id", "source", "book_id", "status", "downloaded", "total", "error", "updated_at")}
+                       for job in (archive.active_jobs() if archive else [])]
+        for job in jobs + active_jobs:
             for private in sorted(private_values, key=len, reverse=True):
                 job["error"] = job["error"].replace(private, "[redacted]")
         return JSONResponse({"releaseVersion": __version__, "pythonVersion": sys.version.split()[0],
@@ -441,7 +443,7 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
                              "browserPackages": packages,
                              "archiveWorkerRunning": bool(worker and worker.is_running()),
                              "activeArchiveJobs": worker.active_count() if worker else 0,
-                             "recentJobs": jobs}, headers={"Cache-Control": "private, no-store"})
+                             "activeJobs": active_jobs, "recentJobs": jobs}, headers={"Cache-Control": "private, no-store"})
 
     @app.get("/v1/search")
     def search(q: str = Query(default="", max_length=100),
@@ -688,8 +690,12 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
         return {"recorded": apply(writable_archive().record_activity, source_id, book_id)}
 
     @app.get("/v1/archive/jobs")
-    def archive_jobs():
-        return {"items": writable_archive().jobs()}
+    def archive_jobs(history_only: bool = False):
+        return {"items": writable_archive().jobs(history_only=history_only)}
+
+    @app.get("/v1/archive/jobs/active")
+    def active_archive_jobs():
+        return {"items": writable_archive().active_jobs()}
 
     @app.get("/v1/archive/config")
     def archive_configuration():

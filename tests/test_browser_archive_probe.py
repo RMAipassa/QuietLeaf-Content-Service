@@ -241,3 +241,109 @@ def test_cloak_requires_private_license_configuration_before_any_browser_starts(
     assert main(["--archive-dir", str(tmp_path / "camoufox-archive-test-cloak"), "--engine", "cloakbrowser"]) == 1
     output = capsys.readouterr().out
     assert "CLOAKBROWSER_LICENSE_KEY" in output
+
+
+def test_stalled_non_challenge_reader_gets_one_normal_reload(monkeypatch, capsys):
+    from quietleaf_service import browser_archive_probe as module
+    clock = [0.0]
+    story = "An original story about Lin Feng returning to the village.\n" * 30
+
+    class Page:
+        url = "https://wtr-lab.com" + NOVEL_PATH + "/chapter-267"
+        frames = []
+        reloads = 0
+
+        def locator(self, _selector):
+            return self
+
+        async def all_inner_texts(self):
+            return [story if self.reloads else ""]
+
+        async def title(self):
+            return "Chapter 267"
+
+        async def reload(self, **kwargs):
+            self.reloads += 1
+
+    async def sleep(_seconds):
+        clock[0] += 61
+
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    transport = BrowserTransport.__new__(BrowserTransport)
+    transport.page = Page()
+    transport.active_novel_path = NOVEL_PATH
+    transport.reader_activity = None
+    transport.verification_seen, transport.verification_completed = set(), set()
+    transport.reader_errors, transport.reader_responses = {}, {}
+    assert asyncio.run(transport._read_chapter(267)) == story
+    assert transport.page.reloads == 1
+    assert "reader_reloading_stalled_page" in capsys.readouterr().out
+
+
+def test_pending_verification_is_waited_for_without_reload(monkeypatch):
+    from quietleaf_service import browser_archive_probe as module
+    clock = [0.0]
+
+    class Page:
+        url = "https://wtr-lab.com" + NOVEL_PATH + "/chapter-267"
+        frames = []
+
+        def locator(self, _selector):
+            return self
+
+        async def all_inner_texts(self):
+            return [""]
+
+        async def title(self):
+            return "Just a moment..."
+
+        async def reload(self, **kwargs):
+            pytest.fail("A pending verification must not be automatically refreshed")
+
+    async def sleep(_seconds):
+        clock[0] += 190
+
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    transport = BrowserTransport.__new__(BrowserTransport)
+    transport.page = Page()
+    transport.active_novel_path = NOVEL_PATH
+    transport.reader_activity = None
+    transport.verification_seen, transport.verification_completed = {267}, set()
+    transport.reader_errors, transport.reader_responses = {}, {}
+    with pytest.raises(SourceError, match="did not complete"):
+        asyncio.run(transport._read_chapter(267))
+
+
+def test_explicit_retry_refreshes_the_same_failed_reader_page():
+    story = "An original story about Lin Feng returning to the village.\n" * 30
+
+    class Page:
+        url = "https://wtr-lab.com" + NOVEL_PATH + "/chapter-267"
+        frames = []
+        reloads = 0
+
+        def locator(self, _selector):
+            return self
+
+        async def all_inner_texts(self):
+            return [story if self.reloads else ""]
+
+        async def title(self):
+            return "Chapter 267"
+
+        async def reload(self, **kwargs):
+            self.reloads += 1
+
+    transport = BrowserTransport.__new__(BrowserTransport)
+    transport.page = Page()
+    transport.active_novel_path = NOVEL_PATH
+    transport.reader_activity = {"phase": "error"}
+    transport.verification_seen, transport.verification_completed = set(), set()
+    transport.reader_errors = {267: "unavailable"}
+    transport.reader_responses = {267: {"success": False, "code": "CHAPTER_NOT_RELEASED"}}
+    assert asyncio.run(transport._read_chapter(267)) == story
+    assert transport.page.reloads == 1
+    assert transport.reader_activity["phase"] == "idle"
+    assert transport.reader_activity["readerResponse"] == {}
