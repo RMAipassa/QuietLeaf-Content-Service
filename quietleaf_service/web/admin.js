@@ -159,6 +159,12 @@
     return job.refresh && job.range_start ? ` | Chapters ${job.range_start}–${job.range_end}` : "";
   }
 
+  function readerLink(book, inspect = false) {
+    const link = node("a", "secondary-button", inspect ? "Inspect chapters" : "Read");
+    link.href = `/reader?${new URLSearchParams({ source: book.source, book: book.id, mode: inspect ? "inspect" : "read" })}`;
+    return link;
+  }
+
   function renderSummary() {
     const active = state.activeJobs;
     const enabledFollows = state.follows.filter((follow) => Number(follow.enabled) === 1);
@@ -262,7 +268,7 @@
       remove.disabled = Boolean(active);
       remove.title = active ? "Finish or cancel the archive job before deleting this novel." : "Delete this server archive";
       remove.addEventListener("click", () => deleteBook(book));
-      actions.append(badge, rearchive, remove);
+      actions.append(badge, readerLink(book), readerLink(book, true), rearchive, remove);
       card.append(copy, actions);
       return card;
     }));
@@ -496,7 +502,7 @@
           await refresh();
         } catch (error) { showNotice(error.message); remove.disabled = false; }
       });
-      actions.append(original, remove);
+      actions.append(readerLink({ ...book, source: "private" }), readerLink({ ...book, source: "private" }, true), original, remove);
       card.append(copy, actions);
       return card;
     }));

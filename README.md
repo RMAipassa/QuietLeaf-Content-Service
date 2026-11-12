@@ -245,6 +245,26 @@ For a batch, include the same `startChapter`/`endChapter` fields beside `items` 
 
 Jobs persist `range_start`/`range_end` and snapshot the selected chapter IDs at enqueue time. Pause/resume, retries and service restarts retain that exact target set and skip already-refreshed chapters; they do not expand a partial job into a whole-book refresh. Existing archive databases add the optional bounds automatically. Retrying a completed range job refreshes that same selected set again. Failed replacement attempts retain their old readable copies and existing source rate limits.
 
+### Web reading and chapter inspection (v0.15.0)
+
+Open `/reader`, use **Web reader** in the console, or click a saved novel's **Read** / **Inspect chapters** link. The reader uses the existing admin login/session and offers a saved-library search, chapter filtering, previous/next saved-chapter navigation, text size and dark/light/sepia themes. Private TXT/text-EPUB uploads are read as chapters; private PDF/CBZ/image-EPUB volumes use the existing local page-image API.
+
+**Inspect only** does not change reading progress. It shows saved timestamps, stored bytes, displayed/stored character counts and whether source-notice cleanup changed the displayed text. **Open raw saved text** opens an authenticated `text/plain` copy. Prose and metadata are rendered with text nodes, never interpreted as HTML. The shell contains no private book data; content APIs are authenticated, `private, no-store`, and archived-only. Missing saved text returns 404 rather than invoking a live adapter. Reading continues from stored copies with an adapter disabled.
+
+- `GET /v1/reader/books?q=...`: saved archive/private-library catalog.
+- `GET /v1/reader/books/{source}/{book}`: local metadata, chapter saved-state index and current progress.
+- `GET /v1/reader/books/{source}/{book}/chapters/{chapter}`: saved text/inspection details or local page-volume metadata; `?plain=true&raw=true` returns stored plain text.
+
+### Reading-progress sync protocol (service v0.15.0 / Android v0.12.0)
+
+Progress is stored independently in `archive.sqlite3`, keyed by provider/book ID. It contains the chapter ID, fraction, server revision/timestamp and random client/event IDs. Preserve that database in service backups. Browser reading resumes service positions on opening/refocusing; Android reconciles on foreground/book opening, coalesces reading updates and retries queued operations when connected. Browser storage and Android private preferences retain unacknowledged operations without storing chapter prose or service passwords/tokens there.
+
+- `GET /v1/reading-progress?offset=0&limit=200`: paginated positions (`items`, `total`; maximum 500 per page).
+- `GET /v1/reading-progress/{source}/{book}`: `{"progress":null}` or the current position.
+- `PUT /v1/reading-progress/{source}/{book}` with `chapterId`, `fraction` (0–1), `baseRevision`, `clientId`, `eventId`: compare-and-set update. New positions use revision 0 as their base.
+
+Successful writes increment the server revision. Repeating the same still-current client/event/body returns its existing revision. A stale base returns HTTP 409 with the current service position; clients retain both positions and offer a choice, rather than replacing newer service data with an old offline write. A late GET cannot roll an acknowledged client revision backwards. Inspection requests do not write progress. Authenticated browser writes require the existing `X-QuietLeaf-Admin: 1` confirmation header; Android uses the existing Bearer token. `/v1/health.readingProgressSync` advertises support when authenticated archive storage is configured.
+
 ### Optional Camoufox browser probe (v0.12.2)
 
 The one-shot `quietleaf_service.browser_probe` diagnostic tests whether a real browser on the current host can render chapters **1 and 11** of *Game Arrival: 100% Drop Rate, I'm Invincible!*. It uses `QUIETLEAF_WTRLAB_COOKIE` and `QUIETLEAF_WTRLAB_ACCESS_AUTHORIZED` from the process environment or private `.env`. Only the account session token is imported into the browser; analytics and copied Cloudflare clearance cookies are excluded.

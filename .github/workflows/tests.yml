@@ -24,7 +24,7 @@ jobs:
         with:
           node-version: '22'
       - name: Test console actions
-        run: node --test tests/admin_console.test.cjs
+        run: node --test tests/admin_console.test.cjs tests/web_progress.test.cjs
 
   deploy:
     name: Deploy to AMP

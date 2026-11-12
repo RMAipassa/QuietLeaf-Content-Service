@@ -182,3 +182,10 @@ test("invalid range input cannot queue a re-archive request", async () => {
   assert.equal(elements.get("rearchive-start").disabled, true);
   assert.ok(button(elements.get("book-list"), "Re-archive saved chapters"));
 });
+
+test("saved novels offer separate read and inspection links", async () => {
+  const { elements } = await consoleFixture();
+  const links = descendants(elements.get("book-list")).filter((item) => item.tagName === "A");
+  assert.ok(links.some((item) => item.textContent === "Read" && item.href === "/reader?source=wtr-lab&book=second&mode=read"));
+  assert.ok(links.some((item) => item.textContent === "Inspect chapters" && item.href === "/reader?source=wtr-lab&book=second&mode=inspect"));
+});

@@ -56,6 +56,15 @@ class ArchiveRefreshBatch(ChapterRange):
     items: list[BookSelection] = Field(min_length=1, max_length=50)
 
 
+class ReadingProgressUpdate(BaseModel):
+    model_config = {"extra": "forbid"}
+    chapterId: str = Field(min_length=1, max_length=100)
+    fraction: float = Field(ge=0, le=1, allow_inf_nan=False, strict=True)
+    baseRevision: int = Field(ge=0, lt=2 ** 63 - 1, strict=True)
+    clientId: str = Field(min_length=8, max_length=100)
+    eventId: str = Field(min_length=8, max_length=100)
+
+
 class OperationalConfiguration(BaseModel):
     archiveConcurrency: int = Field(ge=1, le=MAX_ARCHIVE_CONCURRENCY)
     followIntervalSeconds: int = Field(
@@ -134,6 +143,8 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
     public_paths = {
         "/", "/admin", "/admin/", "/healthz",
         "/admin/assets/admin.css", "/admin/assets/admin.js",
+        "/reader", "/reader/", "/admin/assets/reader.css", "/admin/assets/reader.js",
+        "/admin/assets/progress.js",
     }
     protected_response_paths = public_paths | {"/admin/login", "/admin/logout"}
 
@@ -208,7 +219,7 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
                     request.headers.get("x-quietleaf-admin") != "1"):
                 return JSONResponse({"detail": "Admin request confirmation required"}, status_code=403)
         response = await call_next(request)
-        if request.url.path.startswith(("/v1/private/", "/v1/books/private/")):
+        if request.url.path.startswith(("/v1/private/", "/v1/books/private/", "/v1/reader/", "/v1/reading-progress")):
             response.headers["Cache-Control"] = "private, no-store"
             response.headers["X-Content-Type-Options"] = "nosniff"
         if request.url.path in protected_response_paths:
@@ -231,6 +242,11 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
     @app.api_route("/admin/", methods=["GET", "HEAD"], include_in_schema=False)
     def admin():
         return FileResponse(web_root / "index.html", media_type="text/html")
+
+    @app.api_route("/reader", methods=["GET", "HEAD"], include_in_schema=False)
+    @app.api_route("/reader/", methods=["GET", "HEAD"], include_in_schema=False)
+    def web_reader():
+        return FileResponse(web_root / "reader.html", media_type="text/html")
 
     @app.api_route("/healthz", methods=["GET", "HEAD"], include_in_schema=False)
     def health_probe():
@@ -309,6 +325,85 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
         if private_library is None:
             raise HTTPException(status_code=503, detail="Private library requires archive storage and an API token or admin password")
         return private_library
+
+    @app.get("/v1/reader/books")
+    def reader_books(q: str = Query(default="", max_length=100)):
+        storage = writable_archive()
+        books = [{**item, "mediaType": "text"} for item in storage.list_books(q)]
+        private = private_library.listing(q) if private_library else {"items": [], "total": 0}
+        books.extend(private["items"])
+        return {"items": books, "total": (storage.book_count() if not q.strip() else len(books) - len(private["items"])) + private["total"]}
+
+    @app.get("/v1/reader/books/{source_id}/{book_id}")
+    def reader_book(source_id: str, book_id: str):
+        storage = writable_archive()
+        source_id, book_id = apply(require_id, source_id), apply(require_id, book_id)
+        if source_id == "private":
+            item = apply(private_store().details, book_id)
+            rows = [{**row, "archived": True} for row in apply(private_store().chapters, book_id)]
+        else:
+            item = storage.stats(source_id, book_id)
+            if item is None:
+                raise HTTPException(status_code=404, detail="Book is not saved on this service")
+            item["mediaType"] = "text"
+            rows = storage.chapters(source_id, book_id)
+        return {"book": item, "chapters": rows, "progress": storage.reading_position(source_id, book_id)}
+
+    @app.get("/v1/reader/books/{source_id}/{book_id}/chapters/{chapter_id}")
+    def reader_chapter(source_id: str, book_id: str, chapter_id: str, plain: bool = False, raw: bool = False):
+        storage = writable_archive()
+        source_id, book_id, chapter_id = (apply(require_id, value) for value in (source_id, book_id, chapter_id))
+        if source_id == "private":
+            item = apply(private_store().details, book_id)
+            rows = apply(private_store().chapters, book_id)
+            row = next((row for row in rows if row["id"] == chapter_id), None)
+            if row is None:
+                raise HTTPException(status_code=404, detail="Private chapter not found")
+            if item["mediaType"] != "text":
+                if plain:
+                    raise HTTPException(status_code=422, detail="This item is read as pages")
+                return {**row, "mediaType": item["mediaType"], "pageCount": item["pageCount"],
+                        "origin": "private-library", "savedAt": item["uploadedAt"], "storedBytes": item["originalBytes"]}
+            text = apply(private_store().text, book_id, chapter_id)
+            result = {**row, "text": text, "characters": len(text), "storedBytes": len(text.encode("utf-8")),
+                      "savedAt": item["uploadedAt"], "origin": "private-library", "mediaType": "text"}
+        else:
+            result = storage.inspected_chapter(source_id, book_id, chapter_id, raw=raw)
+            if result is None:
+                raise HTTPException(status_code=404, detail="Chapter is not archived yet; this reader only opens saved copies")
+        if plain:
+            return PlainTextResponse(result["text"], media_type="text/plain; charset=utf-8")
+        return result
+
+    @app.get("/v1/reading-progress")
+    def reading_progress_list(offset: int = Query(default=0, ge=0), limit: int = Query(default=200, ge=1, le=500)):
+        return writable_archive().reading_positions(offset, limit)
+
+    @app.get("/v1/reading-progress/{source_id}/{book_id}")
+    def reading_progress(source_id: str, book_id: str):
+        value = writable_archive().reading_position(apply(require_id, source_id), apply(require_id, book_id))
+        return {"progress": value}
+
+    @app.put("/v1/reading-progress/{source_id}/{book_id}")
+    def update_reading_progress(source_id: str, book_id: str, update: ReadingProgressUpdate):
+        storage = writable_archive()
+        source_id, book_id = apply(require_id, source_id), apply(require_id, book_id)
+        chapter_id = apply(require_id, update.chapterId)
+        if source_id == "private":
+            rows = apply(private_store().chapters, book_id)
+        else:
+            rows = storage.chapters(source_id, book_id)
+            if not rows and source_id not in by_id and storage.book(source_id, book_id) is None:
+                raise HTTPException(status_code=404, detail="Unknown reading-progress source")
+        if rows and not any(row["id"] == chapter_id for row in rows):
+            raise HTTPException(status_code=422, detail="Reading-progress chapter is not in this book's index")
+        accepted, value = apply(storage.save_reading_position, source_id, book_id, chapter_id, update.fraction,
+                                update.baseRevision, update.clientId, update.eventId)
+        if not accepted:
+            return JSONResponse({"detail": "Reading progress changed on another device", "progress": value}, status_code=409)
+        if source_id != "private":
+            storage.record_activity(source_id, book_id)
+        return {"progress": value}
 
     @app.get("/v1/private/books")
     def private_books(q: str = Query(default="", max_length=100), offset: int = Query(default=0, ge=0),
@@ -396,7 +491,7 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
 
     @app.get("/v1/health")
     def health():
-        return {"service": "quietleaf-content-api", "version": 1,
+        return {"service": "quietleaf-content-api", "version": 1, "readingProgressSync": archive is not None and bool(token or admin_password),
                 "releaseVersion": __version__,
                 "archiveEnabled": archive is not None,
                 "privateLibraryEnabled": private_library is not None,

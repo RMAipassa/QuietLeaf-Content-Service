@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en" data-reader-theme="dark" data-reader-size="medium">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light"><title>QuietLeaf Web Reader</title>
+  <link rel="stylesheet" href="/admin/assets/admin.css"><link rel="stylesheet" href="/admin/assets/reader.css">
+  <script src="/admin/assets/progress.js" defer></script><script src="/admin/assets/reader.js" defer></script>
+</head>
+<body class="web-reader">
+  <header class="masthead">
+    <a class="brand" href="/reader"><span class="leaf-mark">QL</span><span><strong>QuietLeaf</strong><small>web reader</small></span></a>
+    <div class="connection"><a href="/admin">Service console</a><button id="reader-logout" class="text-button" hidden>Log out</button></div>
+  </header>
+  <main>
+    <section id="reader-login" class="login-panel">
+      <div class="login-copy"><p class="eyebrow">Your saved library</p><h1>Read anywhere.</h1><p>Read and inspect the copies saved on your service. Sign in with the same service admin password.</p></div>
+      <form id="reader-login-form" class="token-card"><label for="reader-password">Admin password</label>
+        <input id="reader-password" type="password" autocomplete="current-password" required>
+        <button class="primary-button" type="submit">Open reader</button><p id="reader-login-error" class="form-error" role="alert"></p>
+      </form>
+    </section>
+    <section id="reader-workspace" hidden>
+      <div class="reader-tools">
+        <label>Mode<select id="reader-mode"><option value="read">Read and sync progress</option><option value="inspect">Inspect only</option></select></label>
+        <label>Theme<select id="reader-theme"><option value="dark">Dark</option><option value="sepia">Sepia</option><option value="light">Light</option></select></label>
+        <label>Text size<select id="reader-size"><option value="small">Small</option><option value="medium">Medium</option><option value="large">Large</option><option value="extra-large">Extra large</option></select></label>
+        <button id="reader-sync" class="secondary-button">Sync progress</button>
+      </div>
+      <p id="reader-sync-status" class="muted" role="status"></p>
+      <div id="reader-conflict" class="notice" hidden><p>Reading progress changed on another device. Choose the position you want to continue from.</p>
+        <button id="reader-use-service" class="secondary-button">Use service position</button>
+        <button id="reader-keep-local" class="secondary-button">Keep this browser's position</button>
+      </div>
+      <div class="reader-layout">
+        <aside class="reader-sidebar panel">
+          <h2>Saved library</h2><label class="reader-label">Find a book<input id="reader-book-filter" type="search" placeholder="Title or author"></label>
+          <p id="reader-library-note" class="muted"></p><div id="reader-book-list" class="reader-book-list"></div>
+          <hr><h2>Chapters</h2><label class="reader-label">Filter chapters<input id="reader-chapter-filter" type="search" placeholder="Number or title"></label>
+          <label class="reader-check"><input id="reader-show-missing" type="checkbox">Show chapters not saved yet</label>
+          <select id="reader-chapters" size="14" aria-label="Chapters"></select>
+          <button id="reader-refresh" class="secondary-button">Refresh chapter list</button>
+        </aside>
+        <article class="reader-content">
+          <p id="reader-book-source" class="eyebrow"></p><h1 id="reader-book-title">Choose a saved book</h1><p id="reader-book-author" class="muted"></p>
+          <nav class="reader-navigation" aria-label="Chapter navigation"><button id="reader-previous" class="secondary-button" disabled>Previous chapter</button><button id="reader-next" class="secondary-button" disabled>Next chapter</button></nav>
+          <h2 id="reader-chapter-title"></h2><p id="reader-status" class="muted" role="status"></p>
+          <details id="reader-inspection"><summary>Chapter inspection</summary><dl id="reader-inspection-details" class="detail-list"></dl><a id="reader-plain" target="_blank" rel="noopener">Open raw saved text</a></details>
+          <div id="reader-page-controls" class="reader-navigation" hidden><button id="reader-page-previous" class="secondary-button">Previous page</button><label>Page<input id="reader-page-number" type="number" min="1" value="1"></label><span id="reader-page-count"></span><button id="reader-page-next" class="secondary-button">Next page</button></div>
+          <img id="reader-page-image" alt="Saved book page" hidden>
+          <div id="reader-prose" class="chapter-prose" tabindex="0"></div>
+          <nav class="reader-navigation" aria-label="Bottom chapter navigation"><button id="reader-previous-bottom" class="secondary-button" disabled>Previous chapter</button><button id="reader-next-bottom" class="secondary-button" disabled>Next chapter</button></nav>
+        </article>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

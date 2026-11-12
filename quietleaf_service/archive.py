@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import sqlite3
 from contextlib import contextmanager
 import threading
@@ -84,6 +85,12 @@ class ArchiveStore:
                 );
                 CREATE TABLE IF NOT EXISTS configuration (
                     key TEXT PRIMARY KEY, value INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS reading_progress (
+                    source TEXT NOT NULL, book_id TEXT NOT NULL, chapter_id TEXT NOT NULL,
+                    fraction REAL NOT NULL, revision INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+                    client_id TEXT NOT NULL, event_id TEXT NOT NULL,
+                    PRIMARY KEY(source, book_id)
                 );
                 CREATE INDEX IF NOT EXISTS follows_due ON follows(enabled, next_check_at);
                 CREATE INDEX IF NOT EXISTS chapters_by_book ON chapters(source, book_id, ordinal);
@@ -268,6 +275,65 @@ class ArchiveStore:
                                  WHERE source=? AND book_id=? AND id=?""",
                              tuple(map(require_id, (source, book_id, chapter_id)))).fetchone()
         return clean_chapter_text(source, row["body"]) if row and row["body"] is not None else None
+
+    def inspected_chapter(self, source: str, book_id: str, chapter_id: str, raw: bool = False) -> dict | None:
+        with self._connect() as db:
+            row = db.execute("""SELECT id,title,ordinal,body,bytes,updated_at FROM chapters
+                                WHERE source=? AND book_id=? AND id=? AND body IS NOT NULL""",
+                             tuple(map(require_id, (source, book_id, chapter_id)))).fetchone()
+        if row is None:
+            return None
+        cleaned = clean_chapter_text(source, row["body"])
+        text = row["body"] if raw else cleaned
+        return {"id": row["id"], "title": display_title(source, row["title"]), "ordinal": row["ordinal"],
+                "text": text, "characters": len(text), "storedBytes": row["bytes"], "savedAt": row["updated_at"],
+                "storedCharacters": len(row["body"]), "cleanupApplied": cleaned != row["body"],
+                "origin": "archive", "mediaType": "text"}
+
+    @staticmethod
+    def _position_row(row) -> dict | None:
+        if row is None:
+            return None
+        return {"source": row["source"], "bookId": row["book_id"], "chapterId": row["chapter_id"],
+                "fraction": row["fraction"], "revision": row["revision"], "updatedAt": row["updated_at"],
+                "clientId": row["client_id"], "eventId": row["event_id"]}
+
+    def reading_position(self, source: str, book_id: str) -> dict | None:
+        with self._connect() as db:
+            return self._position_row(db.execute("SELECT * FROM reading_progress WHERE source=? AND book_id=?",
+                                                (require_id(source), require_id(book_id))).fetchone())
+
+    def reading_positions(self, offset: int = 0, limit: int = 200) -> dict:
+        with self._connect() as db:
+            rows = db.execute("""SELECT * FROM reading_progress ORDER BY updated_at DESC,source,book_id
+                                 LIMIT ? OFFSET ?""", (min(500, max(1, limit)), max(0, offset))).fetchall()
+            total = db.execute("SELECT COUNT(*) FROM reading_progress").fetchone()[0]
+        return {"items": [self._position_row(row) for row in rows], "total": total}
+
+    def save_reading_position(self, source: str, book_id: str, chapter_id: str, fraction: float,
+                             base_revision: int, client_id: str, event_id: str) -> tuple[bool, dict | None]:
+        source, book_id, chapter_id, client_id, event_id = map(require_id, (source, book_id, chapter_id, client_id, event_id))
+        if (type(fraction) not in (int, float) or not math.isfinite(fraction) or not 0 <= fraction <= 1
+                or type(base_revision) is not int or not 0 <= base_revision < 2 ** 63 - 1):
+            raise SourceError("Invalid reading position")
+        fraction = round(float(fraction), 9)
+        with self.lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM reading_progress WHERE source=? AND book_id=?", (source, book_id)).fetchone()
+            if row and row["client_id"] == client_id and row["event_id"] == event_id:
+                if row["chapter_id"] != chapter_id or row["fraction"] != fraction:
+                    raise SourceError("Reading-progress event ID was reused with different data")
+                return True, self._position_row(row)
+            current_revision = row["revision"] if row else 0
+            if base_revision != current_revision:
+                return False, self._position_row(row)
+            db.execute("""INSERT INTO reading_progress(source,book_id,chapter_id,fraction,revision,updated_at,client_id,event_id)
+                          VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(source,book_id) DO UPDATE SET
+                          chapter_id=excluded.chapter_id,fraction=excluded.fraction,revision=excluded.revision,
+                          updated_at=excluded.updated_at,client_id=excluded.client_id,event_id=excluded.event_id""",
+                       (source, book_id, chapter_id, fraction, current_revision + 1, int(time.time() * 1000), client_id, event_id))
+            updated = db.execute("SELECT * FROM reading_progress WHERE source=? AND book_id=?", (source, book_id)).fetchone()
+            return True, self._position_row(updated)
 
     def list_books(self, query: str = "", source: str = "", limit: int = 200) -> list[dict]:
         params = []
