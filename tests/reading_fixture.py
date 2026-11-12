@@ -2,6 +2,7 @@
 import argparse
 import os
 import sys
+from io import BytesIO
 from pathlib import Path
 
 
@@ -22,6 +23,7 @@ def main():
     from quietleaf_service.app import make_app
     from quietleaf_service.archive import ArchiveStore
     import uvicorn
+    from PIL import Image
 
     class Source:
         id = "fixture"
@@ -39,6 +41,9 @@ def main():
     archive = root / "archive"
     store = ArchiveStore(archive)
     store.save_book("fixture", {"id": "web-book", "title": "Original browser fixture", "author": "Fixture Writer"})
+    cover = BytesIO()
+    Image.new("RGB", (120, 180), "#426348").save(cover, format="PNG")
+    store.save_cover("fixture", "web-book", "image/png", cover.getvalue())
     store.save_chapters("fixture", "web-book", [{"id": name, "title": title, "ordinal": index}
                         for index, (name, title) in enumerate((("one", "First chapter"), ("two", "Second chapter"), ("missing", "Not saved")))])
     for name in ("one", "two"):

@@ -465,6 +465,15 @@ class ArchiveStore:
                                (require_id(source), require_id(book_id))).rowcount
         return bool(count)
 
+    def resume_follow(self, source: str, book_id: str, now: int | None = None) -> dict | None:
+        source, book_id = require_id(source), require_id(book_id)
+        stamp = int(time.time()) if now is None else now
+        with self.lock, self._connect() as db:
+            db.execute("""UPDATE follows SET enabled=1,next_check_at=MIN(next_check_at,?),
+                          failure_count=0,last_error='' WHERE source=? AND book_id=? AND enabled=0""",
+                       (stamp, source, book_id))
+        return self.follow_status(source, book_id)
+
     def follow_status(self, source: str, book_id: str):
         with self._connect() as db:
             row = db.execute("SELECT * FROM follows WHERE source=? AND book_id=?",

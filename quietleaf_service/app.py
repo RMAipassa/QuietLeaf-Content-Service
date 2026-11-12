@@ -799,6 +799,19 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
     def stop_following(source_id: str, book_id: str):
         return {"updated": apply(writable_archive().unfollow, source_id, book_id)}
 
+    @app.post("/v1/archive/follows/{source_id}/{book_id}/resume")
+    def resume_following(source_id: str, book_id: str):
+        storage = writable_archive()
+        source_id, book_id = apply(require_id, source_id), apply(require_id, book_id)
+        source_for(source_id)
+        if source_id == "private":
+            raise HTTPException(status_code=409, detail="Private uploads do not need automatic source checks")
+        follow = apply(storage.resume_follow, source_id, book_id)
+        if follow is None:
+            raise HTTPException(status_code=404, detail="This novel has no existing follow to resume")
+        worker.wake()
+        return {"follow": follow}
+
     @app.post("/v1/archive/activity/{source_id}/{book_id}")
     def reading_activity(source_id: str, book_id: str):
         return {"recorded": apply(writable_archive().record_activity, source_id, book_id)}

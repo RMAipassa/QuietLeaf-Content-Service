@@ -32,15 +32,16 @@ function descendants(root) { return [root, ...root.children.flatMap(descendants)
 function button(root, label) { return descendants(root).find((item) => item.tagName === "BUTTON" && item.textContent === label); }
 async function idle() { await new Promise((resolve) => setImmediate(resolve)); }
 
-async function consoleFixture(initialJobs = [], { hash = "#/overview", storage = new Map() } = {}) {
+async function consoleFixture(initialJobs = [], { hash = "#/overview", storage = new Map(), initialFollows = [] } = {}) {
   const html = fs.readFileSync(path.join(__dirname, "../quietleaf_service/web/index.html"), "utf8");
   const elements = new Map([...html.matchAll(/<([a-z][\w-]*)\b[^>]*\bid="([^"]+)"/gi)].map((match) => [match[2], new Element(match[1])]));
   const requests = [];
   const books = [
-    { source: "novelping", id: "first", title: "First Book", author: "Writer", publicationStatus: "completed" },
+    { source: "novelping", id: "first", title: "First Book", author: "Writer", publicationStatus: "completed", coverArchived: true },
     { source: "wtr-lab", id: "second", title: "Second Book", author: "Writer", publicationStatus: "ongoing" },
   ];
   const jobs = initialJobs.map((job) => ({ ...job }));
+  const follows = initialFollows.map((follow) => ({ ...follow }));
   const fetch = async (url, options = {}) => {
     const method = options.method || "GET";
     requests.push({ url, method, headers: new Headers(options.headers || {}), body: options.body });
@@ -57,6 +58,12 @@ async function consoleFixture(initialJobs = [], { hash = "#/overview", storage =
       const job = jobs.find((item) => item.id === url.split("/")[4]);
       job.status = "paused";
       payload = job;
+    } else if (["POST", "DELETE"].includes(method) && url.startsWith("/v1/archive/follows/")) {
+      const parts = url.split("/");
+      const follow = follows.find((item) => item.source === parts[4] && item.book_id === parts[5]);
+      assert.ok(follow);
+      follow.enabled = method === "POST" ? 1 : 0;
+      payload = method === "POST" ? { follow } : { updated: true };
     } else if (method === "GET" && url.startsWith("/v1/archive/jobs/" ) && !url.endsWith("/active")) {
       payload = jobs.find((job) => job.id === url.split("/").pop());
     } else {
@@ -69,7 +76,7 @@ async function consoleFixture(initialJobs = [], { hash = "#/overview", storage =
         "/v1/archive/books": { items: books, total: books.length },
         "/v1/archive/jobs?history_only=true": { items: jobs.filter((job) => !["queued", "running", "paused"].includes(job.status)) },
         "/v1/archive/jobs/active": { items: jobs.filter((job) => ["queued", "running", "paused"].includes(job.status)) },
-        "/v1/archive/follows": { items: [] },
+        "/v1/archive/follows": { items: follows },
       }[url.startsWith("/v1/archive/books?") ? "/v1/archive/books" : url];
     }
     assert.notEqual(payload, undefined, `Unexpected request ${method} ${url}`);
@@ -226,4 +233,29 @@ test("saved-library sort requests are remembered across console reloads", async 
   const reloaded = await consoleFixture([], { hash: "#/saved", storage });
   assert.equal(reloaded.elements.get("book-sort").value, "added_asc");
   assert.equal(reloaded.elements.get("saved-panel").hidden, false);
+});
+
+test("stopped follows can be resumed without creating a manual archive request", async () => {
+  const { elements, requests } = await consoleFixture([], { hash: "#/following", initialFollows: [
+    { source: "novelping", book_id: "first", enabled: 0, next_check_at: 1 },
+  ] });
+  await button(elements.get("follow-list"), "Resume following").fire("click");
+  assert.ok(button(elements.get("follow-list"), "Stop"));
+  assert.match(elements.get("notice").textContent, /Following resumed/);
+  const writes = requests.filter((request) => request.method !== "GET");
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].url, "/v1/archive/follows/novelping/first/resume");
+  assert.equal(writes[0].headers.get("X-QuietLeaf-Admin"), "1");
+  await button(elements.get("follow-list"), "Stop").fire("click");
+  assert.ok(button(elements.get("follow-list"), "Resume following"));
+});
+
+test("library cards use authenticated saved covers and a placeholder when no cover is saved", async () => {
+  const { elements } = await consoleFixture([], { hash: "#/saved" });
+  const images = descendants(elements.get("book-list")).filter((item) => item.tagName === "IMG");
+  assert.equal(images.length, 1);
+  assert.equal(images[0].src, "/v1/books/novelping/first/cover");
+  assert.equal(images[0].loading, "lazy");
+  assert.equal(images[0].alt, "Cover of First Book");
+  assert.ok(descendants(elements.get("book-list")).some((item) => item.className === "cover-placeholder" && item.textContent === "S"));
 });

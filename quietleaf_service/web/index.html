@@ -143,6 +143,7 @@
           <label class="search-field"><span>Filter</span><input id="book-filter" type="search" placeholder="Title, author, or source"></label>
         </div>
         <label class="search-field sort-field">Sort saved novels<select id="book-sort"></select></label>
+        <details id="archive-tools-details" class="archive-advanced"><summary id="archive-tools-summary">Re-archive tools</summary>
         <div class="archive-tools">
           <div class="archive-range-options">
             <p class="muted">Re-archive saved chapters to replace old text using the current source extractor. Existing copies stay readable until replacements succeed.</p>
@@ -161,6 +162,7 @@
           </div>
           <button id="rearchive-selected" class="secondary-button" type="button" disabled>Re-archive selected (0)</button>
         </div>
+        </details>
         <p id="book-result-note" class="muted"></p>
         <div id="book-list" class="book-list"></div>
         <div class="pagination"><button id="books-previous" class="secondary-button">Previous</button><button id="books-next" class="secondary-button">Next page</button></div>

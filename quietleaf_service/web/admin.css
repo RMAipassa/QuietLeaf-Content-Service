@@ -156,6 +156,16 @@ progress { display: block; width: 100%; height: 10px; margin-top: 12px; accent-c
 .configuration-actions .primary-button { width: auto; margin-top: 0; }
 
 .book-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 24px; }
+#book-list { grid-template-columns: repeat(auto-fill, minmax(min(100%, 330px), 1fr)); gap: 16px; }
+#book-list .library-card { grid-template-columns: 96px minmax(0, 1fr); align-items: start; padding: 16px; background: linear-gradient(155deg, #1b251e, #101612); }
+#book-list .book-actions { grid-column: 1 / -1; flex-direction: row; flex-wrap: wrap; align-items: center; justify-content: start; gap: 8px; padding-top: 12px; border-top: 1px solid var(--line); }
+#book-list .book-actions a, #book-list .book-actions button { font-size: 0.78rem; }
+.book-cover { position: relative; width: 100%; aspect-ratio: 2 / 3; overflow: hidden; display: grid; place-items: center; border-radius: 3px 9px 9px 3px; background: linear-gradient(135deg, #365443, #192b21); box-shadow: inset 4px 0 0 rgba(0,0,0,.25), 0 8px 16px rgba(0,0,0,.3); }
+.cover-placeholder { color: #c4d7a8; font: 2.5rem Georgia, serif; }
+.book-cover img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.archive-advanced { margin-top: 18px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; }
+.archive-advanced summary { cursor: pointer; color: var(--muted); font-size: 0.85rem; }
+#saved-panel:not(:has(#archive-tools-details[open])) .archive-selection { display: none; }
 .book-card { display: grid; grid-template-columns: 1fr auto; gap: 16px; min-width: 0; padding: 18px; border: 1px solid var(--line); border-radius: 13px; background: rgba(8, 12, 10, 0.42); }
 .book-card h3 { margin: 0 0 4px; font-size: 1rem; overflow-wrap: anywhere; }
 .book-card p { margin: 0; color: var(--muted); font-size: 0.82rem; }
@@ -203,10 +213,12 @@ footer { padding: 24px 20px 40px; border-top: 1px solid var(--line); color: var(
   .configuration-actions { align-items: stretch; flex-direction: column; }
   .configuration-actions .primary-button { width: 100%; }
   .book-card { grid-template-columns: 1fr; }
+  #book-list .library-card { grid-template-columns: 80px minmax(0, 1fr); gap: 14px; }
   .book-actions { align-items: stretch; }
   .search-field { width: 100%; }
   .connection #connection-label { display: none; }
-  .heading-actions { flex-direction: column; }
+  .heading-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .heading-actions button, .heading-actions a { text-align: center; min-height: 44px; }
   .archive-tools { align-items: stretch; flex-direction: column; }
   .console-nav { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: -12px; }
   .console-nav a { padding: 10px; text-align: center; }

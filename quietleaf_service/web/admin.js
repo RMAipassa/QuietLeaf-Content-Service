@@ -57,6 +57,7 @@
     for (const [id, pages] of Object.entries(sections)) byId(id).hidden = !pages.includes(page);
     for (const name of Object.keys(pageTitles)) byId(`nav-${name}`).setAttribute("aria-current", name === page ? "page" : "false");
     byId("job-inspection").hidden = !job;
+    homeCacheButton.hidden = !["overview", "settings"].includes(page);
     byId("console-page-title").textContent = job ? "Job inspection" : pageTitles[page];
     document.title = `${job ? "Job inspection" : pageTitles[page]} · QuietLeaf`;
     if (focus) byId("console-page-title").focus({ preventScroll: true });
@@ -182,6 +183,7 @@
   }
 
   function updateRefreshSelection() {
+    byId("archive-tools-summary").textContent = selectedArchives.size ? `Re-archive tools · ${selectedArchives.size} selected` : "Re-archive tools";
     let range = {}, invalid = false;
     try { range = selectedRange(); } catch (_) { invalid = true; }
     rearchiveSelected.textContent = range.startChapter
@@ -217,6 +219,22 @@
     const link = node("a", "secondary-button", inspect ? "Inspect chapters" : "Read");
     link.href = `/reader?${new URLSearchParams({ source: book.source, book: book.id, mode: inspect ? "inspect" : "read" })}`;
     return link;
+  }
+
+  function bookCover(book) {
+    const frame = node("div", "book-cover");
+    frame.title = book.coverArchived ? book.title : "No cover saved yet";
+    const placeholder = node("span", "cover-placeholder", book.title.slice(0, 1).toUpperCase());
+    placeholder.setAttribute("aria-hidden", "true");
+    frame.append(placeholder);
+    if (book.coverArchived) {
+      const image = node("img"); image.loading = "lazy"; image.decoding = "async";
+      image.alt = `Cover of ${book.title}`;
+      image.src = `/v1/books/${encodeURIComponent(book.source)}/${encodeURIComponent(book.id)}/cover`;
+      image.addEventListener("error", () => { image.hidden = true; frame.title = "Saved cover unavailable"; });
+      frame.append(image);
+    }
+    return frame;
   }
 
   function renderSummary() {
@@ -277,7 +295,7 @@
       return;
     }
     list.replaceChildren(...books.map((book) => {
-      const card = node("article", "book-card");
+      const card = node("article", "book-card library-card");
       const copy = node("div");
       const publication = { ongoing: "Ongoing", completed: "Completed" }[book.publicationStatus];
       copy.append(node("h3", "", book.title), node("p", "", `${book.author || "Unknown author"} | ${book.source}${publication ? ` | ${publication}` : ""}`));
@@ -324,7 +342,7 @@
       remove.title = active ? "Finish or cancel the archive job before deleting this novel." : "Delete this server archive";
       remove.addEventListener("click", () => deleteBook(book));
       actions.append(badge, readerLink(book), readerLink(book, true), rearchive, remove);
-      card.append(copy, actions);
+      card.append(bookCover(book), copy, actions);
       return card;
     }));
     updateRefreshSelection();
@@ -397,6 +415,12 @@
         const stop = node("button", "secondary-button", "Stop");
         stop.addEventListener("click", () => stopFollowing(follow, stop));
         actions.append(stop);
+      } else {
+        const resume = node("button", "secondary-button", "Resume following");
+        resume.disabled = !state.health.sources.some((source) => source.id === follow.source);
+        resume.title = resume.disabled ? "Enable this source adapter before resuming checks." : "Restart automatic chapter checks; saved chapters are retained.";
+        resume.addEventListener("click", () => resumeFollowing(follow, resume));
+        actions.append(resume);
       }
       row.append(copy, actions);
       return row;
@@ -518,6 +542,18 @@
       await refresh();
     } catch (error) {
       showNotice(`Could not stop automatic checks: ${error.message}`);
+      button.disabled = false;
+    }
+  }
+
+  async function resumeFollowing(follow, button) {
+    button.disabled = true;
+    try {
+      await api(`/v1/archive/follows/${encodeURIComponent(follow.source)}/${encodeURIComponent(follow.book_id)}/resume`, { method: "POST" });
+      await refresh();
+      showNotice("Following resumed. Automatic chapter checks are enabled again.");
+    } catch (error) {
+      showNotice(`Could not resume automatic checks: ${error.message}`);
       button.disabled = false;
     }
   }
