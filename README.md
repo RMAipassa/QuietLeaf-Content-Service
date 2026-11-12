@@ -245,6 +245,14 @@ For a batch, include the same `startChapter`/`endChapter` fields beside `items` 
 
 Jobs persist `range_start`/`range_end` and snapshot the selected chapter IDs at enqueue time. Pause/resume, retries and service restarts retain that exact target set and skip already-refreshed chapters; they do not expand a partial job into a whole-book refresh. Existing archive databases add the optional bounds automatically. Retrying a completed range job refreshes that same selected set again. Failed replacement attempts retain their old readable copies and existing source rate limits.
 
+### Responsive console and saved-library sorting (v0.16.0)
+
+The console uses linkable pages under `/admin#/overview`, `#/saved`, `#/private`, `#/jobs`, `#/following`, and `#/settings`. Overview shows archive status, total saved novels/jobs, followed-novel count, active jobs and service details. Jobs supports direct inspection at `#/jobs/{jobId}`, including live progress, timestamps, errors, chapter ranges and pause/resume/retry controls. Layouts adapt to desktop/tablet/mobile, and live refresh runs every 15 seconds without resetting the selected page or unsaved settings. Saved novels, private uploads and job history are paginated.
+
+Saved novels, private-library uploads and the web reader can sort by `last_read_desc`, `last_read_asc`, `added_desc`, `added_asc`, or `title`. Each view remembers its own choice. Unread books stay last in either last-read direction. The authenticated `/v1/archive/books`, `/v1/private/books`, and `/v1/reader/books` endpoints accept `sort`, `offset`, and `limit`; sorting happens before pagination, and the reader merges archives/uploads into one globally sorted catalog. Book metadata exposes `addedAt` and `lastReadAt` as Unix milliseconds (`uploadedAt` remains seconds for compatibility).
+
+Archive date added is stable across metadata refreshes and re-archiving. Existing databases backfill it from their earliest known metadata/job/follow timestamp; exact original dates cannot be reconstructed when older records no longer exist. Last read combines existing reading-activity records with revision-checked reading progress; inspection, metadata refresh, and downloads do not count as reads. Private uploads use their upload timestamp and progress activity. Android v0.13.0 adds a paginated **Saved on service** library view and corresponding sorting controls.
+
 ### Web reading and chapter inspection (v0.15.0)
 
 Open `/reader`, use **Web reader** in the console, or click a saved novel's **Read** / **Inspect chapters** link. The reader uses the existing admin login/session and offers a saved-library search, chapter filtering, previous/next saved-chapter navigation, text size and dark/light/sepia themes. Private TXT/text-EPUB uploads are read as chapters; private PDF/CBZ/image-EPUB volumes use the existing local page-image API.

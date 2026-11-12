@@ -4,6 +4,7 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light"><title>QuietLeaf Web Reader</title>
   <link rel="stylesheet" href="/admin/assets/admin.css"><link rel="stylesheet" href="/admin/assets/reader.css">
+  <script src="/admin/assets/library.js" defer></script>
   <script src="/admin/assets/progress.js" defer></script><script src="/admin/assets/reader.js" defer></script>
 </head>
 <body class="web-reader">
@@ -34,7 +35,9 @@
       <div class="reader-layout">
         <aside class="reader-sidebar panel">
           <h2>Saved library</h2><label class="reader-label">Find a book<input id="reader-book-filter" type="search" placeholder="Title or author"></label>
+          <label class="reader-label">Sort saved library<select id="reader-library-sort"></select></label>
           <p id="reader-library-note" class="muted"></p><div id="reader-book-list" class="reader-book-list"></div>
+          <button id="reader-library-more" class="secondary-button" hidden>Load more books</button>
           <hr><h2>Chapters</h2><label class="reader-label">Filter chapters<input id="reader-chapter-filter" type="search" placeholder="Number or title"></label>
           <label class="reader-check"><input id="reader-show-missing" type="checkbox">Show chapters not saved yet</label>
           <select id="reader-chapters" size="14" aria-label="Chapters"></select>

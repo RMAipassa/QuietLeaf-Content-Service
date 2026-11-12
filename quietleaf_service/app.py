@@ -35,6 +35,7 @@ from .novelping import NovelPingSource
 from .wtrlab import WtrLabSource
 from .private_library import MAX_UPLOAD_BYTES, PrivateLibrarySource
 from .metadata import publication_status
+from .library_sort import BookSort, book_sort_key
 
 
 class BookSelection(BaseModel):
@@ -90,15 +91,16 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
               private_max_bytes: int = 10 * 1024 ** 3, private_max_upload_bytes: int = MAX_UPLOAD_BYTES) -> FastAPI:
     if admin_password and not 12 <= len(admin_password) <= 1024:
         raise ValueError("Admin password must contain between 12 and 1024 characters")
-    private_library = PrivateLibrarySource(archive_dir / "private-library", private_max_bytes, private_max_upload_bytes) if archive_dir and (token or admin_password) else None
-    sources = [*sources, private_library] if private_library else list(sources)
-    by_id = {source.id: source for source in sources}
-    if len(by_id) != len(sources):
-        raise ValueError("Duplicate source identifier")
     archive = ArchiveStore(
         archive_dir, archive_max_bytes, follow_interval, active_interval,
         archive_concurrency=archive_concurrency,
     ) if archive_dir else None
+    private_library = PrivateLibrarySource(archive_dir / "private-library", private_max_bytes, private_max_upload_bytes,
+                                          progress_database=archive.database) if archive and (token or admin_password) else None
+    sources = [*sources, private_library] if private_library else list(sources)
+    by_id = {source.id: source for source in sources}
+    if len(by_id) != len(sources):
+        raise ValueError("Duplicate source identifier")
     worker = ArchiveWorker(archive, sources, archive.archive_concurrency) if archive else None
     home_feed_worker = HomeFeedWorker(sources)
 
@@ -145,6 +147,7 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
         "/admin/assets/admin.css", "/admin/assets/admin.js",
         "/reader", "/reader/", "/admin/assets/reader.css", "/admin/assets/reader.js",
         "/admin/assets/progress.js",
+        "/admin/assets/library.js",
     }
     protected_response_paths = public_paths | {"/admin/login", "/admin/logout"}
 
@@ -327,12 +330,14 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
         return private_library
 
     @app.get("/v1/reader/books")
-    def reader_books(q: str = Query(default="", max_length=100)):
+    def reader_books(q: str = Query(default="", max_length=100), sort: BookSort = "added_desc",
+                     offset: int = Query(default=0, ge=0, le=100000), limit: int = Query(default=100, ge=1, le=200)):
         storage = writable_archive()
-        books = [{**item, "mediaType": "text"} for item in storage.list_books(q)]
-        private = private_library.listing(q) if private_library else {"items": [], "total": 0}
+        books = [{**item, "mediaType": "text"} for item in storage.list_books(q, limit=offset + limit, sort=sort)]
+        private = private_library.listing(q, limit=offset + limit, sort=sort) if private_library else {"items": [], "total": 0}
         books.extend(private["items"])
-        return {"items": books, "total": (storage.book_count() if not q.strip() else len(books) - len(private["items"])) + private["total"]}
+        books.sort(key=lambda item: book_sort_key(item, sort))
+        return {"items": books[offset:offset + limit], "total": storage.book_count(q) + private["total"]}
 
     @app.get("/v1/reader/books/{source_id}/{book_id}")
     def reader_book(source_id: str, book_id: str):
@@ -407,8 +412,8 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
 
     @app.get("/v1/private/books")
     def private_books(q: str = Query(default="", max_length=100), offset: int = Query(default=0, ge=0),
-                      limit: int = Query(default=100, ge=1, le=100)):
-        return private_store().listing(q, offset, limit)
+                      limit: int = Query(default=100, ge=1, le=100), sort: BookSort = "added_desc"):
+        return private_store().listing(q, offset, limit, sort)
 
     @app.post("/v1/private/books", status_code=201)
     async def upload_private_book(request: Request, filename: str = Query(max_length=250),
@@ -494,6 +499,8 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
         return {"service": "quietleaf-content-api", "version": 1, "readingProgressSync": archive is not None and bool(token or admin_password),
                 "releaseVersion": __version__,
                 "archiveEnabled": archive is not None,
+                "archiveJobCount": archive.job_count() if archive else 0,
+                "archivedBookCount": archive.book_count() if archive else 0,
                 "privateLibraryEnabled": private_library is not None,
                 "sourceCapabilities": {source.id: {
                     "genreSearch": bool(getattr(source, "supports_genre_search", True)),
@@ -709,10 +716,11 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
                                  media_type="text/plain; charset=utf-8")
 
     @app.get("/v1/archive/books")
-    def archived_books(q: str = ""):
+    def archived_books(q: str = Query(default="", max_length=100), sort: BookSort = "added_desc",
+                       offset: int = Query(default=0, ge=0), limit: int = Query(default=200, ge=1, le=500)):
         storage = writable_archive()
-        items = storage.list_books(q)
-        return {"items": items, "total": storage.book_count() if not q.strip() else len(items)}
+        items = storage.list_books(q, limit=limit, sort=sort, offset=offset)
+        return {"items": items, "total": storage.book_count(q)}
 
     @app.get("/v1/archive/books/{source_id}/{book_id}")
     def archived_book(source_id: str, book_id: str):
@@ -796,8 +804,9 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
         return {"recorded": apply(writable_archive().record_activity, source_id, book_id)}
 
     @app.get("/v1/archive/jobs")
-    def archive_jobs(history_only: bool = False):
-        return {"items": writable_archive().jobs(history_only=history_only)}
+    def archive_jobs(history_only: bool = False, offset: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1, le=500)):
+        storage = writable_archive()
+        return {"items": storage.jobs(history_only=history_only, offset=offset, limit=limit), "total": storage.job_count(history_only)}
 
     @app.get("/v1/archive/jobs/active")
     def active_archive_jobs():

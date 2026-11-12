@@ -20,6 +20,7 @@ from defusedxml import ElementTree
 from PIL import Image, ImageOps
 
 from .adapters import MAX_TEXT_BYTES, SourceError, require_id
+from .library_sort import BookSort, book_order
 
 
 MAX_UPLOAD_BYTES = 100_000_000
@@ -193,10 +194,12 @@ class PrivateLibrarySource:
     id = "private"
     name = "Private library"
 
-    def __init__(self, root: Path, max_bytes: int = 10 * 1024 ** 3, max_upload_bytes: int = MAX_UPLOAD_BYTES):
+    def __init__(self, root: Path, max_bytes: int = 10 * 1024 ** 3, max_upload_bytes: int = MAX_UPLOAD_BYTES,
+                 progress_database: Path | None = None):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.database = self.root / "library.sqlite3"
+        self.progress_database = progress_database
         self.max_bytes = max_bytes
         self.max_upload_bytes = max_upload_bytes
         self.lock = threading.RLock()
@@ -210,6 +213,8 @@ class PrivateLibrarySource:
     def _connect(self):
         db = sqlite3.connect(self.database, timeout=15)
         db.row_factory = sqlite3.Row
+        if self.progress_database is not None:
+            db.execute("ATTACH DATABASE ? AS progress_archive", (str(self.progress_database),))
         try:
             yield db
             db.commit()
@@ -222,7 +227,7 @@ class PrivateLibrarySource:
     def _row(self, book_id: str):
         require_id(book_id)
         with self._connect() as db:
-            row = db.execute("SELECT * FROM books WHERE id=?", (book_id,)).fetchone()
+            row = db.execute(self._book_select() + " WHERE id=?", (book_id,)).fetchone()
         if row is None:
             raise SourceError("Private library book not found")
         return row
@@ -234,14 +239,19 @@ class PrivateLibrarySource:
                 "coverUrl": "", "coverArchived": (self.root / row["id"] / "cover.jpg").is_file(),
                 "mediaType": row["media_type"], "pageCount": manifest.get("pageCount", 0),
                 "chapterCount": len(manifest.get("chapters", [])) if row["media_type"] == "text" else 1,
-                "originalName": row["filename"], "originalBytes": row["original_bytes"], "uploadedAt": row["created_at"]}
+                "originalName": row["filename"], "originalBytes": row["original_bytes"], "uploadedAt": row["created_at"],
+                "addedAt": row["created_at"] * 1000, "lastReadAt": row["last_read_at"]}
 
-    def listing(self, query: str = "", offset: int = 0, limit: int = 100) -> dict:
+    def _book_select(self):
+        read = "COALESCE((SELECT updated_at FROM progress_archive.reading_progress WHERE source='private' AND book_id=books.id),0)" if self.progress_database else "0"
+        return f"SELECT books.*,{read} AS last_read_at FROM books"
+
+    def listing(self, query: str = "", offset: int = 0, limit: int = 100, sort: BookSort = "added_desc") -> dict:
         pattern = "%" + query.strip()[:100] + "%"
         with self._connect() as db:
             count = db.execute("SELECT COUNT(*) FROM books WHERE title LIKE ? OR author LIKE ?", (pattern, pattern)).fetchone()[0]
-            rows = db.execute("SELECT * FROM books WHERE title LIKE ? OR author LIKE ? ORDER BY created_at DESC,id LIMIT ? OFFSET ?",
-                              (pattern, pattern, min(100, limit), max(0, offset))).fetchall()
+            rows = db.execute(self._book_select() + " WHERE title LIKE ? OR author LIKE ? ORDER BY " + book_order(sort, "id") + " LIMIT ? OFFSET ?",
+                               (pattern, pattern, max(1, limit), max(0, offset))).fetchall()
         return {"items": [self._metadata(row) for row in rows], "total": count, "maxUploadBytes": self.max_upload_bytes}
 
     def search(self, query: str, genre: str = "") -> list[dict]:
@@ -316,7 +326,7 @@ class PrivateLibrarySource:
         book_id = digest.hexdigest()
         with self.lock:
             with self._connect() as db:
-                existing = db.execute("SELECT * FROM books WHERE id=?", (book_id,)).fetchone()
+                existing = db.execute(self._book_select() + " WHERE id=?", (book_id,)).fetchone()
             if existing:
                 return {"book": self._metadata(existing), "duplicate": True}
             with tempfile.TemporaryDirectory(prefix=".import-", dir=self.root) as stage:

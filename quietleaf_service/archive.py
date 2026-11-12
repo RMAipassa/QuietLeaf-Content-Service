@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from .adapters import MAX_TEXT_BYTES, Source, SourceError, require_id
 from .content import clean_chapter_text
+from .library_sort import BookSort, book_order
 from .metadata import display_title, publication_status
 
 
@@ -99,6 +100,13 @@ class ArchiveStore:
             book_columns = {row["name"] for row in db.execute("PRAGMA table_info(books)").fetchall()}
             if "publication_status" not in book_columns:
                 db.execute("ALTER TABLE books ADD COLUMN publication_status TEXT NOT NULL DEFAULT 'unknown'")
+            if "created_at" not in book_columns:
+                db.execute("ALTER TABLE books ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0")
+                db.execute("""UPDATE books SET created_at=(SELECT MIN(stamp) FROM (
+                    SELECT books.updated_at AS stamp UNION ALL
+                    SELECT created_at FROM jobs WHERE jobs.source=books.source AND jobs.book_id=books.id UNION ALL
+                    SELECT created_at FROM follows WHERE follows.source=books.source AND follows.book_id=books.id
+                ) WHERE stamp>0)""")
             job_columns = {row["name"] for row in db.execute("PRAGMA table_info(jobs)").fetchall()}
             if "run_token" not in job_columns:
                 db.execute("ALTER TABLE jobs ADD COLUMN run_token TEXT NOT NULL DEFAULT ''")
@@ -157,6 +165,7 @@ class ArchiveStore:
             "coverUrl": row["cover_url"], "genre": row["genre"],
             "archived": True, "coverArchived": bool(row["cover_archived"]),
             "publicationStatus": publication_status(row["publication_status"]),
+            "addedAt": row["created_at"] * 1000, "lastReadAt": row["last_read_at"],
         }
 
     @staticmethod
@@ -173,15 +182,15 @@ class ArchiveStore:
         book_id = require_id(book["id"])
         with self.lock, self._connect() as db:
             db.execute("""
-                INSERT INTO books(source, id, title, author, description, cover_url, genre, updated_at, publication_status)
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO books(source, id, title, author, description, cover_url, genre, updated_at, publication_status, created_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source, id) DO UPDATE SET
                     title=excluded.title, author=excluded.author,
                     description=excluded.description, cover_url=excluded.cover_url,
                     genre=excluded.genre, updated_at=excluded.updated_at, publication_status=excluded.publication_status
             """, (source, book_id, book["title"], book.get("author", ""),
                   book.get("description", ""), book.get("coverUrl", ""),
-                  book.get("genre", ""), int(time.time()), publication_status(book.get("publicationStatus"))))
+                  book.get("genre", ""), int(time.time()), publication_status(book.get("publicationStatus")), int(time.time())))
 
     def cover(self, source: str, book_id: str) -> tuple[str, bytes] | None:
         with self._connect() as db:
@@ -254,11 +263,19 @@ class ArchiveStore:
 
     def book(self, source: str, book_id: str):
         with self._connect() as db:
-            row = db.execute("""SELECT books.*, EXISTS(SELECT 1 FROM covers WHERE
-                             covers.source=books.source AND covers.book_id=books.id) AS cover_archived
-                             FROM books WHERE source=? AND id=?""",
-                             (require_id(source), require_id(book_id))).fetchone()
+            row = db.execute(self._book_select() + " WHERE source=? AND id=?",
+                              (require_id(source), require_id(book_id))).fetchone()
         return self._book_row(row)
+
+    @staticmethod
+    def _book_select():
+        return """SELECT books.*, EXISTS(SELECT 1 FROM covers WHERE
+            covers.source=books.source AND covers.book_id=books.id) AS cover_archived,
+            MAX(COALESCE((SELECT last_read_at*1000 FROM follows WHERE
+                follows.source=books.source AND follows.book_id=books.id),0),
+                COALESCE((SELECT updated_at FROM reading_progress WHERE
+                reading_progress.source=books.source AND reading_progress.book_id=books.id),0)) AS last_read_at
+            FROM books"""
 
     def chapters(self, source: str, book_id: str) -> list[dict]:
         with self._connect() as db:
@@ -335,26 +352,26 @@ class ArchiveStore:
             updated = db.execute("SELECT * FROM reading_progress WHERE source=? AND book_id=?", (source, book_id)).fetchone()
             return True, self._position_row(updated)
 
-    def list_books(self, query: str = "", source: str = "", limit: int = 200) -> list[dict]:
+    def list_books(self, query: str = "", source: str = "", limit: int = 200,
+                   sort: BookSort = "added_desc", offset: int = 0) -> list[dict]:
         params = []
         filters = []
         if query.strip():
-            filters.append("(title LIKE ? OR author LIKE ?)")
-            params.extend(["%" + query.strip()[:100] + "%"] * 2)
+            filters.append("(title LIKE ? OR author LIKE ? OR source LIKE ?)")
+            params.extend(["%" + query.strip()[:100] + "%"] * 3)
         if source:
             filters.append("source=?")
             params.append(require_id(source))
         where = " WHERE " + " AND ".join(filters) if filters else ""
         with self._connect() as db:
-            rows = db.execute("""SELECT books.*, EXISTS(SELECT 1 FROM covers WHERE
-                              covers.source=books.source AND covers.book_id=books.id) AS cover_archived
-                              FROM books""" + where + " ORDER BY updated_at DESC LIMIT ?",
-                              (*params, limit)).fetchall()
+            rows = db.execute(self._book_select() + where + " ORDER BY " + book_order(sort) + " LIMIT ? OFFSET ?",
+                              (*params, max(1, limit), max(0, offset))).fetchall()
         return [self._book_row(r) for r in rows]
 
-    def book_count(self) -> int:
+    def book_count(self, query: str = "") -> int:
         with self._connect() as db:
-            return int(db.execute("SELECT COUNT(*) FROM books").fetchone()[0])
+            pattern = "%" + query.strip()[:100] + "%"
+            return int(db.execute("SELECT COUNT(*) FROM books WHERE title LIKE ? OR author LIKE ? OR source LIKE ?", (pattern, pattern, pattern)).fetchone()[0])
 
     def stats(self, source: str, book_id: str):
         book = self.book(source, book_id)
@@ -577,11 +594,17 @@ class ArchiveStore:
             row = db.execute("SELECT * FROM jobs WHERE id=?", (require_id(job_id),)).fetchone()
         return self._job_row(row)
 
-    def jobs(self, history_only: bool = False):
+    def job_count(self, history_only: bool = False):
+        where = " WHERE status NOT IN ('queued','running','paused')" if history_only else ""
+        with self._connect() as db:
+            return db.execute("SELECT COUNT(*) FROM jobs" + where).fetchone()[0]
+
+    def jobs(self, history_only: bool = False, offset: int = 0, limit: int = 100):
         where = " WHERE status NOT IN ('queued','running','paused')" if history_only else ""
         with self._connect() as db:
             return [self._job_row(row) for row in db.execute(
-                "SELECT * FROM jobs" + where + " ORDER BY updated_at DESC,created_at DESC,rowid DESC LIMIT 100").fetchall()]
+                "SELECT * FROM jobs" + where + " ORDER BY updated_at DESC,created_at DESC,rowid DESC LIMIT ? OFFSET ?",
+                (min(500, max(1, limit)), max(0, offset))).fetchall()]
 
     def active_jobs(self):
         with self._connect() as db:

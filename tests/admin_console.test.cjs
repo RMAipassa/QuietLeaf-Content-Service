@@ -32,7 +32,7 @@ function descendants(root) { return [root, ...root.children.flatMap(descendants)
 function button(root, label) { return descendants(root).find((item) => item.tagName === "BUTTON" && item.textContent === label); }
 async function idle() { await new Promise((resolve) => setImmediate(resolve)); }
 
-async function consoleFixture(initialJobs = []) {
+async function consoleFixture(initialJobs = [], { hash = "#/overview", storage = new Map() } = {}) {
   const html = fs.readFileSync(path.join(__dirname, "../quietleaf_service/web/index.html"), "utf8");
   const elements = new Map([...html.matchAll(/<([a-z][\w-]*)\b[^>]*\bid="([^"]+)"/gi)].map((match) => [match[2], new Element(match[1])]));
   const requests = [];
@@ -57,6 +57,8 @@ async function consoleFixture(initialJobs = []) {
       const job = jobs.find((item) => item.id === url.split("/")[4]);
       job.status = "paused";
       payload = job;
+    } else if (method === "GET" && url.startsWith("/v1/archive/jobs/" ) && !url.endsWith("/active")) {
+      payload = jobs.find((job) => job.id === url.split("/").pop());
     } else {
       payload = {
         "/v1/health": { service: "quietleaf-content-api", version: 1, releaseVersion: "0.11.0", archiveWorkerRunning: true,
@@ -68,18 +70,24 @@ async function consoleFixture(initialJobs = []) {
         "/v1/archive/jobs?history_only=true": { items: jobs.filter((job) => !["queued", "running", "paused"].includes(job.status)) },
         "/v1/archive/jobs/active": { items: jobs.filter((job) => ["queued", "running", "paused"].includes(job.status)) },
         "/v1/archive/follows": { items: [] },
-      }[url];
+      }[url.startsWith("/v1/archive/books?") ? "/v1/archive/books" : url];
     }
     assert.notEqual(payload, undefined, `Unexpected request ${method} ${url}`);
     return { ok: true, status: method === "POST" ? 202 : 200, json: async () => payload };
   };
   const document = { getElementById: (id) => elements.get(id), createElement: (tag) => new Element(tag) };
-  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../quietleaf_service/web/admin.js"), "utf8"), {
+  const listeners = new Map();
+  const location = { hash };
+  const context = vm.createContext({
     document, fetch, Headers, URLSearchParams,
-    window: { setInterval: () => 1, clearInterval() {}, setTimeout: () => 1, clearTimeout() {}, confirm: () => true },
+    location,
+    window: { setInterval: () => 1, clearInterval() {}, setTimeout: () => 1, clearTimeout() {}, confirm: () => true,
+      addEventListener: (event, callback) => listeners.set(event, callback),
+      localStorage: { getItem: (key) => storage.get(key), setItem: (key, value) => storage.set(key, value) } },
   });
+  for (const script of ["library.js", "admin.js"]) vm.runInContext(fs.readFileSync(path.join(__dirname, "../quietleaf_service/web/" + script), "utf8"), context);
   await idle();
-  return { elements, requests, jobs };
+  return { elements, requests, jobs, storage, navigate: async (hash) => { location.hash = hash; listeners.get("hashchange")(); await idle(); } };
 }
 
 test("a novel's re-archive button queues a refresh and exposes progress and pause controls", async () => {
@@ -188,4 +196,34 @@ test("saved novels offer separate read and inspection links", async () => {
   const links = descendants(elements.get("book-list")).filter((item) => item.tagName === "A");
   assert.ok(links.some((item) => item.textContent === "Read" && item.href === "/reader?source=wtr-lab&book=second&mode=read"));
   assert.ok(links.some((item) => item.textContent === "Inspect chapters" && item.href === "/reader?source=wtr-lab&book=second&mode=inspect"));
+});
+
+test("console pages isolate their content and support direct navigation and job inspection", async () => {
+  const job = { id: "test-job", source: "wtr-lab", book_id: "second", status: "failed", total: 335, downloaded: 90,
+    created_at: 1, updated_at: 2, error: "Saved copy retained", refresh: true, range_start: 1, range_end: 100 };
+  const { elements, navigate } = await consoleFixture([job]);
+  assert.equal(elements.get("overview-summary").hidden, false);
+  assert.equal(elements.get("saved-panel").hidden, true);
+  assert.equal(elements.get("private-library-panel").hidden, true);
+  await navigate("#/saved");
+  assert.equal(elements.get("overview-summary").hidden, true);
+  assert.equal(elements.get("saved-panel").hidden, false);
+  await navigate("#/jobs/test-job");
+  assert.equal(elements.get("job-inspection").hidden, false);
+  assert.match(elements.get("job-inspection-details").textContent, /Saved copy retained/);
+  assert.match(elements.get("job-inspection-details").textContent, /1–100/);
+  await navigate("#/settings");
+  assert.equal(elements.get("settings-panel").hidden, false);
+  assert.equal(elements.get("job-inspection").hidden, true);
+  assert.equal(elements.get("nav-settings")["aria-current"], "page");
+});
+
+test("saved-library sort requests are remembered across console reloads", async () => {
+  const { elements, requests, storage } = await consoleFixture();
+  elements.get("book-sort").value = "added_asc";
+  await elements.get("book-sort").fire("change");
+  assert.ok(requests.some((request) => request.url.startsWith("/v1/archive/books?sort=added_asc&")));
+  const reloaded = await consoleFixture([], { hash: "#/saved", storage });
+  assert.equal(reloaded.elements.get("book-sort").value, "added_asc");
+  assert.equal(reloaded.elements.get("saved-panel").hidden, false);
 });

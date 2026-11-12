@@ -11,6 +11,8 @@
   const refreshButton = byId("refresh-button");
   const homeCacheButton = byId("home-cache-button");
   const bookFilter = byId("book-filter");
+  const bookSort = byId("book-sort");
+  const privateSort = byId("private-sort");
   const configurationForm = byId("configuration-form");
   const archiveConcurrency = byId("archive-concurrency");
   const followInterval = byId("follow-interval");
@@ -31,9 +33,61 @@
   let authenticated = false;
   let timer = null;
   let refreshing = false;
+  let refreshAgain = false;
+  let inspectionSequence = 0;
+  let archiveOffset = 0, privateOffset = 0, historyOffset = 0;
+  const pageTitles = { overview: "Service overview", saved: "Saved novels", private: "Private library", jobs: "Archive jobs", following: "Following", settings: "Service settings" };
   let configurationDirty = false;
   let configurationRevision = 0;
   let state = { health: null, configuration: null, books: [], booksTotal: 0, jobs: [], activeJobs: [], follows: [] };
+  window.QuietLeafLibrary.setupSort(bookSort, "archive", () => { archiveOffset = 0; return refresh(); });
+  window.QuietLeafLibrary.setupSort(privateSort, "private", () => { privateOffset = 0; return refresh(); });
+
+  function route() {
+    const parts = location.hash.replace(/^#\/?/, "").split("/");
+    const page = Object.hasOwn(pageTitles, parts[0]) ? parts[0] : "overview";
+    return { page, job: page === "jobs" && /^[A-Za-z0-9_-]{1,100}$/.test(parts[1] || "") ? parts[1] : "" };
+  }
+
+  function showPage(focus = false) {
+    const { page, job } = route();
+    const sections = { "overview-summary": ["overview"], "service-panel": ["overview"], "active-jobs-panel": ["overview", "jobs"],
+      "saved-panel": ["saved"], "private-library-panel": ["private"], "settings-panel": ["settings"],
+      "history-panel": ["jobs"], "following-panel": ["following"] };
+    for (const [id, pages] of Object.entries(sections)) byId(id).hidden = !pages.includes(page);
+    for (const name of Object.keys(pageTitles)) byId(`nav-${name}`).setAttribute("aria-current", name === page ? "page" : "false");
+    byId("job-inspection").hidden = !job;
+    byId("console-page-title").textContent = job ? "Job inspection" : pageTitles[page];
+    document.title = `${job ? "Job inspection" : pageTitles[page]} · QuietLeaf`;
+    if (focus) byId("console-page-title").focus({ preventScroll: true });
+    if (job && authenticated) refreshInspection();
+  }
+
+  async function refreshInspection() {
+    const { job: id } = route();
+    const sequence = ++inspectionSequence;
+    if (!id || !authenticated) return;
+    byId("job-inspection-status").textContent = "Loading job details...";
+    try {
+      const job = await api(`/v1/archive/jobs/${encodeURIComponent(id)}`);
+      if (sequence !== inspectionSequence || route().job !== id || !authenticated) return;
+      byId("job-inspection-title").textContent = titleFor(job.source, job.book_id);
+      byId("job-inspection-status").textContent = `${job.status} · ${job.downloaded} / ${job.total} chapters`;
+      byId("job-inspection-actions").replaceChildren(jobRow(job), readerLink({ source: job.source, id: job.book_id }, true));
+      const values = [["Job ID", job.id], ["Source / novel", `${job.source} / ${job.book_id}`], ["Status", job.status],
+        ["Operation", job.refresh ? "Re-archive saved chapters" : "Archive novel"], ["Created", formatTime(job.created_at)],
+        ["Last updated", formatTime(job.updated_at)], ["Chapter range", job.range_start ? `${job.range_start}–${job.range_end}` : "All chapters"],
+        ["Progress", `${job.downloaded} / ${job.total}`], ["Last error", job.error || "None"]];
+      byId("job-inspection-details").replaceChildren(...values.map(([label, value]) => {
+        const row = node("div"); row.append(node("dt", "", label), node("dd", "", value)); return row;
+      }));
+    } catch (error) {
+      if (sequence === inspectionSequence && route().job === id) {
+        byId("job-inspection-status").textContent = error.message;
+        byId("job-inspection-actions").replaceChildren(); byId("job-inspection-details").replaceChildren();
+      }
+    }
+  }
 
   function node(tag, className = "", text = "") {
     const item = document.createElement(tag);
@@ -44,7 +98,7 @@
 
   function setConnection(online) {
     byId("connection-dot").classList.toggle("online", online);
-    byId("connection-label").textContent = online ? "Connected" : "Locked";
+    byId("connection-label").textContent = online ? "Connected" : authenticated ? "Offline" : "Locked";
   }
 
   function showNotice(message) {
@@ -170,8 +224,8 @@
     const enabledFollows = state.follows.filter((follow) => Number(follow.enabled) === 1);
     byId("metric-service").textContent = state.health.archiveWorkerRunning ? "Online" : "Idle";
     byId("metric-version").textContent = `Release ${state.health.releaseVersion || "unknown"}`;
-    byId("metric-books").textContent = String(state.booksTotal);
-    byId("metric-jobs").textContent = String(state.jobs.length);
+    byId("metric-books").textContent = String(state.health.archivedBookCount ?? state.booksTotal);
+    byId("metric-jobs").textContent = String(state.health.archiveJobCount ?? state.jobs.length);
     byId("metric-job-detail").textContent = active.length ? `${active.length} active or paused` : "No active work";
     byId("metric-follows").textContent = String(enabledFollows.length);
   }
@@ -215,9 +269,9 @@
     const books = state.books.filter((book) =>
       `${book.title} ${book.author} ${book.source}`.toLowerCase().includes(needle)
     );
-    byId("book-result-note").textContent = state.booksTotal > state.books.length
-      ? `Showing the newest ${state.books.length} of ${state.booksTotal} saved novels.`
-      : `${state.books.length} saved ${state.books.length === 1 ? "novel" : "novels"}.`;
+    byId("book-result-note").textContent = `${state.booksTotal ? archiveOffset + 1 : 0}–${archiveOffset + state.books.length} of ${state.booksTotal} saved novels in the selected order.`;
+    byId("books-previous").disabled = archiveOffset === 0;
+    byId("books-next").disabled = archiveOffset + state.books.length >= state.booksTotal;
     if (!books.length) {
       list.replaceChildren(node("p", "empty-state", needle ? "No saved novels match this filter." : "No novels are archived yet."));
       return;
@@ -231,6 +285,7 @@
       const follow = state.follows.find((item) => item.source === book.source && item.book_id === book.id);
       const progress = job && job.total ? `${job.downloaded} / ${job.total} chapters ${job.refresh ? "re-archived" : "archived"}` : "Archived metadata available";
       copy.append(node("p", "metadata", progress + (job ? jobRangeLabel(job) : "")));
+      copy.append(node("p", "metadata", window.QuietLeafLibrary.dates(book)));
 
       const actions = node("div", "book-actions");
       const badge = node("span", `badge ${job?.status === "failed" ? "failed" : follow?.enabled ? "active" : ""}`,
@@ -282,9 +337,14 @@
     const progress = job.total ? `${job.downloaded} / ${job.total} chapters ${job.refresh ? "re-archived" : "archived"}` : "Waiting for chapter list";
     copy.append(node("small", "", `${progress}${jobRangeLabel(job)} | updated ${formatTime(job.updated_at)}`));
     if (job.error) copy.append(node("small", "", job.error));
+    if (job.total) {
+      const bar = node("progress"); bar.max = job.total; bar.value = job.downloaded;
+      bar.setAttribute("aria-label", `${job.downloaded} of ${job.total} chapters`); copy.append(bar);
+    }
     const actions = node("div", "row-actions");
     const badge = node("span", `badge ${job.status === "failed" ? "failed" : ["queued", "running"].includes(job.status) ? "active" : ""}`, job.status);
     actions.append(badge);
+    const inspect = node("a", "secondary-button", "Inspect job"); inspect.href = `#/jobs/${encodeURIComponent(job.id)}`; actions.append(inspect);
     const controls = job.status === "paused" ? [["resume", "Resume"], ["cancel", "Cancel"]]
       : job.status === "failed" ? [["retry", "Retry"], ["cancel", "Cancel"]]
       : ["queued", "running"].includes(job.status) ? [["pause", "Pause"], ["cancel", "Cancel"]] : [];
@@ -309,7 +369,11 @@
     byId("active-job-count").textContent = String(active.length);
     byId("active-job-list").replaceChildren(...(active.length ? active.map(jobRow)
       : [node("p", "empty-state", "No active archive jobs.")]));
-    const history = state.jobs.filter((job) => !["queued", "running", "paused"].includes(job.status)).slice(0, 12);
+    const history = state.jobs.filter((job) => !["queued", "running", "paused"].includes(job.status));
+    const total = state.historyTotal ?? history.length;
+    byId("jobs-previous").disabled = historyOffset === 0;
+    byId("jobs-next").disabled = historyOffset + history.length >= total;
+    byId("jobs-page-note").textContent = `${total ? historyOffset + 1 : 0}–${historyOffset + history.length} of ${total}`;
     byId("job-list").replaceChildren(...(history.length ? history.map(jobRow)
       : [node("p", "empty-state", "No finished archive jobs yet.")]));
   }
@@ -351,18 +415,19 @@
   }
 
   async function refresh() {
-    if (!authenticated || refreshing) return;
+    if (!authenticated) return;
+    if (refreshing) { refreshAgain = true; return; }
     refreshing = true;
     const startedConfigurationRevision = configurationRevision;
     refreshButton.disabled = true;
     showNotice("");
     try {
       const [health, configuration, books, jobs, activeJobs, follows] = await Promise.all([
-        api("/v1/health"), api("/v1/archive/config"), api("/v1/archive/books"),
-        api("/v1/archive/jobs?history_only=true"), api("/v1/archive/jobs/active"), api("/v1/archive/follows"),
+        api("/v1/health"), api("/v1/archive/config"), api(`/v1/archive/books?sort=${encodeURIComponent(bookSort.value)}&q=${encodeURIComponent(bookFilter.value.trim())}&offset=${archiveOffset}`),
+        api(`/v1/archive/jobs?history_only=true${historyOffset ? `&offset=${historyOffset}` : ""}`), api("/v1/archive/jobs/active"), api("/v1/archive/follows"),
       ]);
       const privateBooks = health.privateLibraryEnabled
-        ? await api(`/v1/private/books?q=${encodeURIComponent(privateFilter.value.trim())}`)
+        ? await api(`/v1/private/books?q=${encodeURIComponent(privateFilter.value.trim())}&sort=${encodeURIComponent(privateSort.value)}&offset=${privateOffset}`)
         : { items: [], total: 0 };
       state = {
         health,
@@ -374,14 +439,19 @@
         booksTotal: Number(books.total ?? books.items.length),
         jobs: [...activeJobs.items, ...jobs.items.filter((job) => !activeJobs.items.some((active) => active.id === job.id))],
         activeJobs: activeJobs.items,
+        historyTotal: jobs.total ?? jobs.items.length,
         follows: follows.items,
       };
       render();
+      setConnection(true);
+      if (route().job) await refreshInspection();
     } catch (error) {
       if (authenticated) showNotice(`Could not refresh the console: ${error.message}`);
+      setConnection(false);
     } finally {
       refreshing = false;
       refreshButton.disabled = false;
+      if (refreshAgain) { refreshAgain = false; refresh(); }
     }
   }
 
@@ -480,14 +550,16 @@
   }
 
   function renderPrivateBooks() {
-    byId("private-library-panel").hidden = !state.health?.privateLibraryEnabled;
     const catalog = state.privateBooks || { items: [], total: 0 };
-    byId("private-result-note").textContent = `${catalog.total} private item(s); showing ${catalog.items.length}. Upload limit: ${formatBytes(state.health?.privateMaxUploadBytes)} per file.`;
+    byId("private-result-note").textContent = `${catalog.total ? privateOffset + 1 : 0}–${privateOffset + catalog.items.length} of ${catalog.total} private items. Upload limit: ${formatBytes(state.health?.privateMaxUploadBytes)} per file.`;
+    byId("private-previous").disabled = privateOffset === 0;
+    byId("private-next").disabled = privateOffset + catalog.items.length >= catalog.total;
     byId("private-book-list").replaceChildren(...catalog.items.map((book) => {
       const card = node("article", "book-card");
       const copy = node("div");
       copy.append(node("h3", "", book.title), node("p", "", book.author),
         node("p", "metadata", `${book.mediaType === "text" ? `${book.chapterCount} chapters` : `${book.pageCount} pages`} | ${book.originalName} | ${formatBytes(book.originalBytes)}`));
+      copy.append(node("p", "metadata", window.QuietLeafLibrary.dates(book)));
       const actions = node("div", "book-actions");
       const original = node("a", "secondary-button", "Original file");
       original.href = `/v1/private/books/${encodeURIComponent(book.id)}/file`;
@@ -556,6 +628,7 @@
   });
   let privateSearchTimer;
   privateFilter.addEventListener("input", () => {
+    privateOffset = 0;
     window.clearTimeout(privateSearchTimer);
     privateSearchTimer = window.setTimeout(refresh, 300);
   });
@@ -650,7 +723,16 @@
   });
   refreshButton.addEventListener("click", refresh);
   homeCacheButton.addEventListener("click", refreshHomeShelves);
-  bookFilter.addEventListener("input", renderBooks);
+  let archiveSearchTimer;
+  bookFilter.addEventListener("input", () => {
+    archiveOffset = 0; window.clearTimeout(archiveSearchTimer); archiveSearchTimer = window.setTimeout(refresh, 300);
+  });
+  for (const [id, delta] of [["books-previous", -200], ["books-next", 200]]) byId(id).addEventListener("click", () => { archiveOffset = Math.max(0, archiveOffset + delta); return refresh(); });
+  for (const [id, delta] of [["private-previous", -100], ["private-next", 100]]) byId(id).addEventListener("click", () => { privateOffset = Math.max(0, privateOffset + delta); return refresh(); });
+  for (const [id, delta] of [["jobs-previous", -100], ["jobs-next", 100]]) byId(id).addEventListener("click", () => { historyOffset = Math.max(0, historyOffset + delta); return refresh(); });
+  window.addEventListener("hashchange", () => showPage(true));
+  window.addEventListener("online", refresh);
+  showPage();
 
   (async () => {
     try {

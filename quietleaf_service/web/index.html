@@ -6,6 +6,7 @@
   <meta name="color-scheme" content="dark">
   <title>QuietLeaf Service Console</title>
   <link rel="stylesheet" href="/admin/assets/admin.css">
+  <script src="/admin/assets/library.js" defer></script>
   <script src="/admin/assets/admin.js" defer></script>
 </head>
 <body>
@@ -37,10 +38,15 @@
     </section>
 
     <section id="console" hidden>
+      <nav class="console-nav" aria-label="Console pages">
+        <a id="nav-overview" href="#/overview">Overview</a><a id="nav-saved" href="#/saved">Saved novels</a>
+        <a id="nav-private" href="#/private">Private library</a><a id="nav-jobs" href="#/jobs">Jobs</a>
+        <a id="nav-following" href="#/following">Following</a><a id="nav-settings" href="#/settings">Settings</a>
+      </nav>
       <div class="console-heading">
         <div>
           <p class="eyebrow">Remote library operations</p>
-          <h1>Service overview</h1>
+          <h1 id="console-page-title" tabindex="-1">Service overview</h1>
           <p id="last-updated" class="muted">Waiting for service data.</p>
         </div>
         <div class="heading-actions">
@@ -52,11 +58,11 @@
 
       <div id="notice" class="notice" role="status" hidden></div>
 
-      <section class="metric-grid" aria-label="Service summary">
+      <section id="overview-summary" class="metric-grid" aria-label="Service summary">
         <article class="metric"><span>Archive</span><strong id="metric-service">Checking</strong><small id="metric-version">Service status</small></article>
-        <article class="metric"><span>Saved novels</span><strong id="metric-books">0</strong><small>On this server</small></article>
-        <article class="metric"><span>Archive jobs</span><strong id="metric-jobs">0</strong><small id="metric-job-detail">No active work</small></article>
-        <article class="metric"><span>Following</span><strong id="metric-follows">0</strong><small>Automatic checks enabled</small></article>
+        <a href="#/saved" class="metric"><span>Saved novels</span><strong id="metric-books">0</strong><small>On this server</small></a>
+        <a href="#/jobs" class="metric"><span>Archive jobs</span><strong id="metric-jobs">0</strong><small id="metric-job-detail">No active work</small></a>
+        <a href="#/following" class="metric"><span>Following</span><strong id="metric-follows">0</strong><small>Automatic checks enabled</small></a>
       </section>
 
       <section class="panel" id="active-jobs-panel">
@@ -68,7 +74,7 @@
         <div id="active-job-list" class="compact-list"></div>
       </section>
 
-      <section class="panel service-panel">
+      <section class="panel service-panel" id="service-panel">
         <div>
           <p class="eyebrow">Runtime</p>
           <h2>Service details</h2>
@@ -76,7 +82,7 @@
         <dl id="service-details" class="detail-list"></dl>
       </section>
 
-      <section class="panel configuration-panel">
+      <section class="panel configuration-panel" id="settings-panel" hidden>
         <div class="configuration-copy">
           <p class="eyebrow">Persistent configuration</p>
           <h2>Operational settings</h2>
@@ -111,11 +117,12 @@
         </form>
       </section>
 
-      <section class="panel" id="private-library-panel">
+      <section class="panel" id="private-library-panel" hidden>
         <div class="panel-heading">
           <div><p class="eyebrow">Your own books and manga</p><h2>Private library</h2></div>
           <label class="search-field"><span>Search</span><input id="private-filter" type="search" placeholder="Title or author"></label>
         </div>
+        <label class="search-field sort-field">Sort private library<select id="private-sort"></select></label>
         <p class="muted">Upload TXT, EPUB, CBZ, or PDF files. Originals stay on this server and are available in the app's Private Library.</p>
         <form id="private-upload-form" class="configuration-form">
           <div class="configuration-grid">
@@ -127,13 +134,15 @@
         </form>
         <p id="private-result-note" class="muted"></p>
         <div id="private-book-list" class="book-list"></div>
+        <div class="pagination"><button id="private-previous" class="secondary-button">Previous</button><button id="private-next" class="secondary-button">Next page</button></div>
       </section>
 
-      <section class="panel">
+      <section class="panel" id="saved-panel" hidden>
         <div class="panel-heading">
           <div><p class="eyebrow">Persistent archive</p><h2>Saved novels</h2></div>
           <label class="search-field"><span>Filter</span><input id="book-filter" type="search" placeholder="Title, author, or source"></label>
         </div>
+        <label class="search-field sort-field">Sort saved novels<select id="book-sort"></select></label>
         <div class="archive-tools">
           <div class="archive-range-options">
             <p class="muted">Re-archive saved chapters to replace old text using the current source extractor. Existing copies stay readable until replacements succeed.</p>
@@ -154,18 +163,23 @@
         </div>
         <p id="book-result-note" class="muted"></p>
         <div id="book-list" class="book-list"></div>
+        <div class="pagination"><button id="books-previous" class="secondary-button">Previous</button><button id="books-next" class="secondary-button">Next page</button></div>
       </section>
 
-      <div class="split-grid">
-        <section class="panel">
+        <section class="panel" id="job-inspection" hidden>
+          <div class="panel-heading"><div><p class="eyebrow">Live job inspection</p><h2 id="job-inspection-title">Archive job</h2></div><a href="#/jobs" class="secondary-button">All jobs</a></div>
+          <p id="job-inspection-status" class="muted" role="status"></p>
+          <div id="job-inspection-actions"></div><dl id="job-inspection-details" class="detail-list"></dl>
+        </section>
+        <section class="panel" id="history-panel" hidden>
           <div class="panel-heading"><div><p class="eyebrow">Finished or failed work</p><h2>Recent job history</h2></div></div>
           <div id="job-list" class="compact-list"></div>
+          <div class="pagination"><button id="jobs-previous" class="secondary-button">Previous</button><span id="jobs-page-note" class="muted"></span><button id="jobs-next" class="secondary-button">Next page</button></div>
         </section>
-        <section class="panel">
+        <section class="panel" id="following-panel" hidden>
           <div class="panel-heading"><div><p class="eyebrow">Automatic updates</p><h2>Followed novels</h2></div></div>
           <div id="follow-list" class="compact-list"></div>
         </section>
-      </div>
     </section>
   </main>
 

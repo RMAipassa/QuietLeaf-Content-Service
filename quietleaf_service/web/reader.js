@@ -13,6 +13,8 @@
   let pageIndex = 0, pageCount = 0, imageUrl = null;
   let pullingProgress = false;
   let scrollArmed = false, userScrolled = false;
+  let libraryBooks = [];
+  window.QuietLeafLibrary.setupSort(el("reader-library-sort"), "reader", () => loadLibrary());
 
   function node(tag, text, className = "") {
     const item = document.createElement(tag);
@@ -210,22 +212,27 @@
       if (error.name !== "AbortError" && sequence === selection && authenticated) el("reader-status").textContent = error.message;
     }
   }
-  async function loadLibrary() {
+  async function loadLibrary(append = false) {
     const sequence = ++librarySequence;
     libraryController?.abort(); libraryController = new AbortController();
     try {
-      const payload = await json(`/v1/reader/books?q=${encode(el("reader-book-filter").value.trim())}`, { signal: libraryController.signal });
+      el("reader-library-more").disabled = true;
+      const offset = append ? libraryBooks.length : 0;
+      const payload = await json(`/v1/reader/books?q=${encode(el("reader-book-filter").value.trim())}&sort=${encode(el("reader-library-sort").value)}&offset=${offset}`, { signal: libraryController.signal });
       if (sequence !== librarySequence) return;
-      el("reader-library-note").textContent = `Showing ${payload.items.length} of ${payload.total} saved items`;
-      el("reader-book-list").replaceChildren(...payload.items.map((book) => {
+      libraryBooks = append ? [...libraryBooks, ...payload.items.filter((book) => !libraryBooks.some((old) => old.source === book.source && old.id === book.id))] : payload.items;
+      el("reader-library-note").textContent = `Showing ${libraryBooks.length} of ${payload.total} saved items`;
+      el("reader-library-more").hidden = libraryBooks.length >= payload.total;
+      el("reader-book-list").replaceChildren(...libraryBooks.map((book) => {
         const button = node("button", "", "reader-book");
         button.append(node("strong", book.title), node("small", `${book.author || "Unknown author"} · ${book.source}`));
+        button.append(node("small", window.QuietLeafLibrary.dates(book)));
         button.addEventListener("click", () => loadBook(book.source, book.id));
         return button;
       }));
     } catch (error) {
       if (error.name !== "AbortError" && authenticated) el("reader-library-note").textContent = error.message;
-    }
+    } finally { if (sequence === librarySequence) el("reader-library-more").disabled = false; }
   }
   async function open() {
     try {
@@ -255,6 +262,7 @@
   });
   el("reader-logout").addEventListener("click", async () => { stagePosition(); await flush(); await json("/admin/logout", { method: "POST" }); lock(); });
   el("reader-book-filter").addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(loadLibrary, 300); });
+  el("reader-library-more").addEventListener("click", () => loadLibrary(true));
   el("reader-chapter-filter").addEventListener("input", chapterOptions);
   el("reader-show-missing").addEventListener("change", chapterOptions);
   el("reader-chapters").addEventListener("change", () => loadChapter(el("reader-chapters").value));
