@@ -1,4 +1,4 @@
-# QuietLeaf Content Service (v0.16.2)
+# QuietLeaf Content Service (v0.16.3)
 
 A small Python HTTPS-ready API **separate** from the Android reader. It supplies books through configured adapters while QuietLeaf stores progress and downloaded chapters locally. Running the service is optional: Gutenberg and imports work without it. When using the service, you need a reachable server; the app rejects plain HTTP.
 
@@ -244,6 +244,10 @@ Content-Type: application/json
 For a batch, include the same `startChapter`/`endChapter` fields beside `items` in `POST /v1/archive/refresh`. Both bounds must be supplied as integers with `1 <= start <= end <= 100000`. Omitting both retains all-saved-chapter re-archiving, including existing clients that send no body.
 
 Jobs persist `range_start`/`range_end` and snapshot the selected chapter IDs at enqueue time. Pause/resume, retries and service restarts retain that exact target set and skip already-refreshed chapters; they do not expand a partial job into a whole-book refresh. Existing archive databases add the optional bounds automatically. Retrying a completed range job refreshes that same selected set again. Failed replacement attempts retain their old readable copies and existing source rate limits.
+
+### Browser tab icon (v0.16.3)
+
+The console, login screen, and web reader declare a purple book-and-sage-leaf favicon matching the Android launcher artwork. `/favicon.svg` serves the scalable icon, while `/favicon.ico` provides a 16/32/48/64px fallback for browsers that request the conventional root icon. Only these exact icon paths allow unauthenticated GET/HEAD requests; content APIs and other asset paths retain their existing authentication rules. Both icons are included in Python package data. To regenerate the ICO after editing the SVG, run `python scripts/generate_favicon.py` with the normal service dependencies installed.
 
 ### Purple-led console and reader styling (v0.16.2)
 

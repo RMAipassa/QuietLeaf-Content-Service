@@ -148,6 +148,7 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
         "/reader", "/reader/", "/admin/assets/reader.css", "/admin/assets/reader.js",
         "/admin/assets/progress.js",
         "/admin/assets/library.js",
+        "/favicon.svg", "/favicon.ico",
     }
     protected_response_paths = public_paths | {"/admin/login", "/admin/logout"}
 
@@ -254,6 +255,14 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
     @app.api_route("/healthz", methods=["GET", "HEAD"], include_in_schema=False)
     def health_probe():
         return {"status": "ok"}
+
+    @app.api_route("/favicon.svg", methods=["GET", "HEAD"], include_in_schema=False)
+    def favicon_svg():
+        return FileResponse(web_root / "favicon.svg", media_type="image/svg+xml")
+
+    @app.api_route("/favicon.ico", methods=["GET", "HEAD"], include_in_schema=False)
+    def favicon_ico():
+        return FileResponse(web_root / "favicon.ico", media_type="image/vnd.microsoft.icon")
 
     @app.post("/admin/login", include_in_schema=False)
     async def admin_login(request: Request, response: Response):

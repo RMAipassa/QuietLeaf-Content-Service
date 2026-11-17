@@ -1,6 +1,10 @@
+from io import BytesIO
 from pathlib import Path
+from xml.etree import ElementTree
 
+from bs4 import BeautifulSoup
 from fastapi.testclient import TestClient
+from PIL import Image
 
 from quietleaf_service.adapters import CatalogSource
 from quietleaf_service.app import ADMIN_COOKIE, ADMIN_LOGIN_BODY_BYTES, make_app
@@ -46,6 +50,59 @@ def test_admin_shell_is_public_but_contains_no_private_data(tmp_path):
         assert client.get("/", follow_redirects=False).headers["location"] == "/admin"
 
 
+def test_favicons_are_public_valid_images_with_get_and_head(tmp_path):
+    with make_client(tmp_path) as client:
+        for path, mime in (("/favicon.svg", "image/svg+xml"),
+                           ("/favicon.ico", "image/vnd.microsoft.icon")):
+            icon = client.get(path)
+            assert icon.status_code == 200
+            assert icon.headers["content-type"] == mime
+            assert icon.headers["x-content-type-options"] == "nosniff"
+            assert "set-cookie" not in icon.headers
+            head = client.head(path)
+            assert head.status_code == 200
+            assert head.content == b""
+            assert head.headers["content-type"] == mime
+            assert head.headers["content-length"] == str(len(icon.content))
+            if path.endswith(".svg"):
+                svg = ElementTree.fromstring(icon.content)
+                assert svg.tag == "{http://www.w3.org/2000/svg}svg"
+                assert svg.attrib["viewBox"] == "0 0 108 108"
+            else:
+                with Image.open(BytesIO(icon.content)) as image:
+                    assert image.format == "ICO"
+                    assert image.ico.sizes() == {(16, 16), (32, 32), (48, 48), (64, 64)}
+                    assert image.convert("RGB").getpixel((0, 0)) == (115, 81, 166)
+
+
+def test_console_and_reader_declare_public_favicons_before_login(tmp_path):
+    with make_client(tmp_path) as client:
+        for path in ("/admin", "/admin/", "/reader", "/reader/"):
+            page = client.get(path)
+            assert page.status_code == 200
+            head = BeautifulSoup(page.text, "html.parser").head
+            icons = {icon["href"]: icon for icon in head.select('link[rel="icon"]')}
+            assert set(icons) == {"/favicon.svg", "/favicon.ico"}
+            assert icons["/favicon.svg"]["type"] == "image/svg+xml"
+            assert icons["/favicon.svg"]["sizes"] == "any"
+            assert icons["/favicon.ico"]["type"] == "image/vnd.microsoft.icon"
+
+
+def test_favicon_exemptions_are_exact_and_read_only(tmp_path):
+    with make_client(tmp_path) as client:
+        for path in ("/favicon.svg/", "/favicon.ico/", "/favicon.svg/private",
+                     "/favicon-secret.svg", "/admin/assets/favicon.svg",
+                     "/admin/assets/favicon.ico", "/admin/assets/index.html",
+                     "/v1/health", "/v1/reader/books", "/v1/reading-progress"):
+            for method in ("GET", "HEAD"):
+                response = client.request(method, path)
+                assert response.status_code == 401
+                assert response.headers["www-authenticate"] == "Bearer"
+        for path in ("/favicon.svg", "/favicon.ico"):
+            for method in ("POST", "PUT", "DELETE"):
+                assert client.request(method, path).status_code == 401
+
+
 def test_only_exact_admin_resources_bypass_bearer_auth(tmp_path):
     with make_client(tmp_path) as client:
         missing = client.get("/v1/health")
@@ -59,7 +116,7 @@ def test_only_exact_admin_resources_bypass_bearer_auth(tmp_path):
 
         authorized = client.get("/v1/health", headers={"Authorization": f"Bearer {TOKEN}"})
         assert authorized.status_code == 200
-        assert authorized.json()["releaseVersion"] == "0.16.2"
+        assert authorized.json()["releaseVersion"] == "0.16.3"
         assert authorized.json()["archiveWorkerRunning"] is True
         assert authorized.json()["archiveConcurrency"] == 3
         assert authorized.json()["activeArchiveJobs"] == 0

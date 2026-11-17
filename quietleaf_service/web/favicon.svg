@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108">
+  <title>QuietLeaf</title>
+  <path fill="#7351A6" d="M0 0 L108 0 L108 108 L0 108 Z"/>
+  <path fill="#FCF9FF" d="M19 29 Q37 23 53 34 L53 82 Q35 71 19 77 Z"/>
+  <path fill="#EADDF9" d="M89 29 Q71 23 55 34 L55 82 Q73 71 89 77 Z"/>
+  <path fill="#A7D4B3" d="M48 20 Q77 16 78 42 Q50 45 48 20 Z"/>
+  <path fill="none" stroke="#7351A6" stroke-width="2" d="M53 35 L53 79"/>
+</svg>
