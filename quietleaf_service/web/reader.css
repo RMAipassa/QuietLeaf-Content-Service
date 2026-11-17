@@ -1,6 +1,7 @@
 .web-reader { background: var(--canvas); }
 .web-reader main { padding-top: 24px; width: min(1440px, calc(100% - 40px)); }
-.web-reader a { color: var(--leaf); }
+.web-reader a { color: var(--primary); }
+.web-reader .brand { color: var(--ink); }
 .web-reader .connection { gap: 20px; }
 .reader-tools { display: flex; align-items: end; flex-wrap: wrap; gap: 14px; }
 .reader-tools label { color: var(--muted); font-size: .8rem; min-width: 130px; }
@@ -12,10 +13,13 @@
 .reader-label input { margin-top: 5px; }
 .reader-book-list { display: grid; gap: 8px; max-height: 250px; overflow: auto; }
 .reader-book { text-align: left; color: var(--ink); background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
+.reader-book:hover { border-color: var(--primary); background: var(--primary-container); color: var(--on-primary-container); }
 .reader-book strong, .reader-book small { display: block; overflow-wrap: anywhere; }
 .reader-book small { color: var(--muted); margin-top: 4px; }
 .reader-check { display: flex; align-items: center; gap: 8px; font-size: .75rem; margin: 12px 0; color: var(--muted); }
 .reader-check input { width: 18px; height: 18px; }
+.reader-sidebar hr { border: 0; border-top: 1px solid var(--line); margin: 20px 0; }
+#reader-book-source { color: var(--secondary); }
 #reader-chapters { padding: 5px; font-size: .85rem; margin-bottom: 10px; }
 #reader-chapters option { white-space: normal; padding: 7px; }
 .reader-content { max-width: 820px; width: 100%; margin: 0 auto; padding: 24px 20px 50px; min-width: 0; }
@@ -31,14 +35,56 @@
 #reader-inspection .detail-list { padding: 16px 0; }
 #reader-page-image { display: block; width: 100%; height: auto; margin: 20px auto; }
 #reader-page-image[hidden] { display: none; }
-[data-reader-theme="light"] { --ink:#242c25; --muted:#58655a; --canvas:#f8faf6; --surface:#fff; --surface-2:#eaf0e5; --line:#ccd5c6; --leaf:#315622; --leaf-dark:#fff; }
-[data-reader-theme="sepia"] { --ink:#3f3528; --muted:#746550; --canvas:#f5edda; --surface:#fff7e4; --surface-2:#e9dec5; --line:#cfbea0; --leaf:#526335; --leaf-dark:#fff7e4; }
+/* Theme preferences still apply to the entire reader; prose stays on quiet paper tones. */
+[data-reader-theme="dark"] { --canvas: #141217; }
+[data-reader-theme="light"] {
+  color-scheme: light;
+  --ink: #29232f;
+  --muted: #665d70;
+  --canvas: #faf9fc;
+  --surface: #ffffff;
+  --surface-2: #f0ebf5;
+  --line: #d8cfdf;
+  --field: #ffffff;
+  --control-line: #887a98;
+  --primary: #7351a6;
+  --on-primary: #ffffff;
+  --primary-container: #ecdefa;
+  --on-primary-container: #36204f;
+  --focus-glow: rgba(115, 81, 166, 0.14);
+  --secondary: #4f725d;
+  --secondary-line: #6c8b76;
+  --secondary-glow: rgba(79, 114, 93, 0.12);
+  --amber: #895916;
+  --red: #b63832;
+  --on-error: #ffffff;
+}
+[data-reader-theme="sepia"] {
+  color-scheme: light;
+  --ink: #3f3528;
+  --muted: #746550;
+  --canvas: #f5edda;
+  --surface: #faf5f4;
+  --surface-2: #eee5ed;
+  --line: #d2c4cd;
+  --field: #fffaf2;
+  --control-line: #8b7b87;
+  --primary: #7351a6;
+  --on-primary: #ffffff;
+  --primary-container: #e9dbef;
+  --on-primary-container: #36204f;
+  --focus-glow: rgba(115, 81, 166, 0.14);
+  --secondary: #4f725d;
+  --secondary-line: #6c8b76;
+  --secondary-glow: rgba(79, 114, 93, 0.12);
+  --amber: #895916;
+  --red: #b63832;
+  --on-error: #ffffff;
+}
 [data-reader-theme="light"] .web-reader .masthead, [data-reader-theme="sepia"] .web-reader .masthead { background: var(--canvas); }
 [data-reader-theme="light"] .web-reader .panel, [data-reader-theme="sepia"] .web-reader .panel,
 [data-reader-theme="light"] .web-reader .token-card, [data-reader-theme="sepia"] .web-reader .token-card { background: var(--surface); }
 .web-reader .notice { color: var(--ink); }
-[data-reader-theme="light"] .web-reader input, [data-reader-theme="light"] .web-reader select,
-[data-reader-theme="sepia"] .web-reader input, [data-reader-theme="sepia"] .web-reader select { background: var(--surface); }
 @media(max-width:850px) {
   .reader-layout { grid-template-columns: 1fr; gap: 16px; }
   .reader-sidebar { position: static; max-height: none; }

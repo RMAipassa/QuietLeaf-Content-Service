@@ -1,4 +1,4 @@
-# QuietLeaf Content Service (v0.8)
+# QuietLeaf Content Service (v0.16.2)
 
 A small Python HTTPS-ready API **separate** from the Android reader. It supplies books through configured adapters while QuietLeaf stores progress and downloaded chapters locally. Running the service is optional: Gutenberg and imports work without it. When using the service, you need a reachable server; the app rejects plain HTTP.
 
@@ -244,6 +244,10 @@ Content-Type: application/json
 For a batch, include the same `startChapter`/`endChapter` fields beside `items` in `POST /v1/archive/refresh`. Both bounds must be supplied as integers with `1 <= start <= end <= 100000`. Omitting both retains all-saved-chapter re-archiving, including existing clients that send no body.
 
 Jobs persist `range_start`/`range_end` and snapshot the selected chapter IDs at enqueue time. Pause/resume, retries and service restarts retain that exact target set and skip already-refreshed chapters; they do not expand a partial job into a whole-book refresh. Existing archive databases add the optional bounds automatically. Retrying a completed range job refreshes that same selected set again. Failed replacement attempts retain their old readable copies and existing source rate limits.
+
+### Purple-led console and reader styling (v0.16.2)
+
+The console and saved-content web reader share a purple-led palette with sage accents for online status, active badges, progress, and source labels. Navigation, reading actions, selected cards, form controls, hover states, and keyboard focus use coordinated theme tokens. Reader dark, light, and sepia preferences remain available, with quiet prose backgrounds and theme-aware controls and contrast.
 
 ### Responsive console and saved-library sorting (v0.16.0)
 
