@@ -1,4 +1,4 @@
-# QuietLeaf Content Service (v0.16.3)
+# QuietLeaf Content Service (v0.16.4)
 
 A small Python HTTPS-ready API **separate** from the Android reader. It supplies books through configured adapters while QuietLeaf stores progress and downloaded chapters locally. Running the service is optional: Gutenberg and imports work without it. When using the service, you need a reachable server; the app rejects plain HTTP.
 
@@ -28,6 +28,8 @@ On Android, go to **Settings > Manage sources > Self-hosted content service** an
 Open `http://127.0.0.1:8765/admin` and enter `QUIETLEAF_ADMIN_PASSWORD` to use the private service console. It shows runtime status, saved novels, archive jobs, and automatic checks, and can stop checks, permanently delete archives, or update safe operational settings. The browser receives an HTTP-only session cookie that remains valid for 30 days and survives service restarts. Logging out removes the cookie; changing the configured password invalidates existing sessions.
 
 The admin password must contain at least 12 characters. If `QUIETLEAF_ADMIN_PASSWORD` is not set, the console accepts `QUIETLEAF_API_TOKEN` as a temporary compatibility fallback. Configure a separate password so the API token never needs to be entered into a browser.
+
+Startup now requires an API token or admin password **before opening persistent storage**. Missing credentials or an incorrect working directory must not expose an existing archive. For an intentionally anonymous, stateless sample only, explicitly set `QUIETLEAF_ALLOW_ANONYMOUS_SAMPLE=1` and leave archive/live-source settings unset; this mode never opens archive/private-library storage. Normal authenticated deployments need no new setting.
 
 ### CubeCoders AMP Python App Runner
 
@@ -86,6 +88,10 @@ The authenticated private library stores owned **TXT, EPUB, CBZ, and PDF** files
 The library is enabled automatically when archive storage and an API token or admin password are configured. Its metadata database and immutable original files live under `QUIETLEAF_ARCHIVE_DIR/private-library/`; back up this directory with the archive. Text EPUBs are indexed in spine order, CBZ pages are naturally sorted, and image EPUBs retain spine image order. Image EPUBs additionally get an ordered CBZ offline copy. PDFs are rendered on demand. Android can read volumes from the server or keep a whole volume offline.
 
 Defaults: **100,000,000 bytes per upload**, **10 GiB total** private-library storage, and **2,000 image/PDF pages** per volume. Override `QUIETLEAF_PRIVATE_MAX_UPLOAD_BYTES` and `QUIETLEAF_PRIVATE_MAX_BYTES` if needed, taking your reverse proxy's upload limit into account. TXT files up to 32 MiB are split into reader-sized parts; each extracted EPUB text chapter must fit the existing 2 MiB chapter limit. ZIP expansion is bounded. Uploads use a streamed raw request body, not multipart or base64. Encrypted EPUB content and password-protected PDFs require an unlocked input file.
+
+Image pages must actually be **JPEG, PNG, WebP, or GIF**; renaming a TIFF/PSD/other format to `.png` does not enable another decoder. Raster metadata is limited to 256 KiB (including decompressed PNG text) and container structure is bounded. EPUB imports reject repeated spine resources, cap spine references/chapters at 10,000, and incrementally limit parsed text input to 64 MiB and emitted chapter text to 32 MiB, rather than relying only on unique ZIP-entry sizes.
+
+Native raster decoding and PDF inspection/rendering run in separate processes with **768 MiB memory, 20 seconds user CPU, and 35 seconds wall-time limits**, at most two parser processes at once. Windows uses Job Objects (including child-process restrictions); POSIX uses resource limits. Parsing fails closed if resource limits cannot be installed; authenticated diagnostics reports parser readiness. Children do not inherit service credentials/settings. This is crash/resource containment, **not a low-privilege filesystem/network sandbox**: keep the native libraries, OS and browser patched and the AMP service account least-privileged. EPUB text parsing remains in-process with the incremental work/output limits above.
 
 ```bash
 curl -X POST 'https://your-service.example/v1/private/books?filename=owned-book.epub' \
@@ -244,6 +250,15 @@ Content-Type: application/json
 For a batch, include the same `startChapter`/`endChapter` fields beside `items` in `POST /v1/archive/refresh`. Both bounds must be supplied as integers with `1 <= start <= end <= 100000`. Omitting both retains all-saved-chapter re-archiving, including existing clients that send no body.
 
 Jobs persist `range_start`/`range_end` and snapshot the selected chapter IDs at enqueue time. Pause/resume, retries and service restarts retain that exact target set and skip already-refreshed chapters; they do not expand a partial job into a whole-book refresh. Existing archive databases add the optional bounds automatically. Retrying a completed range job refreshes that same selected set again. Failed replacement attempts retain their old readable copies and existing source rate limits.
+
+### Security hardening (v0.16.4)
+
+- Requires patched **Pillow 13.x**, **cryptography 50.x**, and **pypdfium2 5.15.2+**, with actual-format, metadata, subprocess and EPUB budgets described above.
+- Login admission atomically reserves attempts before reading the body: five attempts per client in five minutes, 100 total admissions per five minutes, at most two in-flight per client/eight globally, and a ten-second body deadline. Malformed/abandoned attempts consume the budget too; a successful owner login clears that client's history. Limits use the ASGI peer identity, never a directly supplied `X-Forwarded-For` header; keep the documented trusted-proxy and single-worker setup. In-memory limits reset on restart; strong unique credentials and appropriate edge protections remain important.
+- All `/v1/` responses, including legacy archive/book/text APIs and authentication/validation errors, send `private, no-store` and `nosniff`.
+- Authenticated `/v1/diagnostics` includes sanitized dependency/native-PDF build versions and parser-limit readiness, without environment values, paths or secrets. It does not expose inventory anonymously or start the source browser.
+
+The existing single-user token permissions and stateless 30-day signed sessions remain the same: logout clears the browser cookie; it does not revoke a previously stolen copy. Session revocation, scoped credentials/MFA and a full operational host/browser review are separate follow-ups.
 
 ### Browser tab icon (v0.16.3)
 

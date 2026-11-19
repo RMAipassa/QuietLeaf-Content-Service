@@ -145,7 +145,9 @@ def test_upload_validation_quota_and_disabled_unauthenticated_library(tmp_path):
         assert upload(api, "file.cbr", b"rar").status_code == 422
         assert upload(api, "first.txt", b"a" * 30).status_code == 201
         assert upload(api, "second.txt", b"b" * 30).status_code == 422
-    with TestClient(make_app([], archive_dir=tmp_path)) as api:
+    with pytest.raises(ValueError, match="authentication"):
+        make_app([], archive_dir=tmp_path)
+    with TestClient(make_app([], allow_anonymous_sample=True)) as api:
         assert api.get("/v1/health").json()["privateLibraryEnabled"] is False
         assert api.get("/v1/private/books").status_code == 503
 
@@ -197,3 +199,88 @@ def test_epub_keeps_inline_emphasis_in_its_paragraph_instead_of_splitting_words(
         result = upload(api, "styled.epub", zip_bytes(entries)).json()["book"]
         text = api.get(f"/v1/books/private/{result['id']}/chapters/chapter-1/text", headers=AUTH).text
         assert text == "Opening\n\nThis is an owned paragraph.\n\nNext paragraph."
+
+
+@pytest.mark.parametrize("format_name", ["TIFF", "BMP", "ICO"])
+def test_disguised_image_formats_are_rejected_even_after_a_valid_first_page(tmp_path, format_name):
+    image = io.BytesIO()
+    Image.new("RGB", (32, 32), "red").save(image, format_name)
+    with TestClient(make_app([], TOKEN, tmp_path)) as api:
+        body = zip_bytes([("1.png", image_bytes()), ("2.png", image.getvalue())])
+        result = upload(api, "disguised.cbz", body)
+        assert result.status_code == 422 and "actual JPEG" in result.json()["detail"]
+        assert api.get("/v1/private/books", headers=AUTH).json()["total"] == 0
+
+
+@pytest.mark.parametrize("format_name", ["JPEG", "PNG", "WEBP", "GIF"])
+def test_supported_raster_formats_decode_in_bounded_subprocess(format_name):
+    from quietleaf_service.private_library import jpeg_page
+    image = io.BytesIO()
+    Image.new("RGB", (24, 32), "red").save(image, format_name)
+    rendered = jpeg_page(image.getvalue())
+    with Image.open(io.BytesIO(rendered)) as result:
+        assert result.format == "JPEG" and result.size == (24, 32)
+
+
+@pytest.mark.parametrize("compressed", [False, True])
+def test_png_metadata_and_decompressed_metadata_budgets(tmp_path, compressed):
+    from PIL.PngImagePlugin import PngInfo
+    from quietleaf_service.document_limits import MAX_IMAGE_METADATA_BYTES
+    metadata = PngInfo()
+    metadata.add_text("description", "x" * (MAX_IMAGE_METADATA_BYTES + 1), zip=compressed)
+    image = io.BytesIO()
+    Image.new("RGB", (1, 1)).save(image, "PNG", pnginfo=metadata)
+    with TestClient(make_app([], TOKEN, tmp_path)) as api:
+        assert upload(api, "metadata.cbz", zip_bytes([("1.png", image.getvalue())])).status_code == 422
+        assert api.get("/v1/private/books", headers=AUTH).json()["total"] == 0
+
+
+def test_native_parser_timeout_and_crash_are_contained(monkeypatch):
+    import subprocess
+    from quietleaf_service.adapters import SourceError
+    from quietleaf_service.document_limits import render_document
+
+    def timeout(*args, **kwargs):
+        assert not any(key.startswith("QUIETLEAF_") for key in kwargs["env"])
+        raise subprocess.TimeoutExpired(args[0], 35)
+    monkeypatch.setenv("QUIETLEAF_API_TOKEN", "fixture-secret-must-not-be-inherited")
+    monkeypatch.setattr("quietleaf_service.document_limits.subprocess.run", timeout)
+    with pytest.raises(SourceError, match="time limit"):
+        render_document("image", b"fixture")
+
+    monkeypatch.setattr("quietleaf_service.document_limits.subprocess.run", lambda *a, **k: subprocess.CompletedProcess(a[0], 1))
+    with pytest.raises(SourceError, match="parser limits"):
+        render_document("image", b"fixture")
+
+
+def _replace_epub(entries, name, text):
+    return [(path, text if path == name else data) for path, data in entries]
+
+
+def test_repeated_epub_spine_resources_stop_before_reparsing(tmp_path, monkeypatch):
+    import quietleaf_service.private_library as library
+    with zipfile.ZipFile(io.BytesIO(epub())) as original:
+        entries = [(item.filename, original.read(item)) for item in original.infolist()]
+    package = dict(entries)["OPS/book.opf"].decode().replace('<itemref idref="second"/>', '<itemref idref="first"/>' * 100)
+    calls = []
+    parse = library.BeautifulSoup
+    monkeypatch.setattr(library, "BeautifulSoup", lambda *a, **k: (calls.append(1), parse(*a, **k))[1])
+    with TestClient(make_app([], TOKEN, tmp_path)) as api:
+        response = upload(api, "repeated.epub", zip_bytes(_replace_epub(entries, "OPS/book.opf", package)))
+        assert response.status_code == 422 and "repeated" in response.json()["detail"]
+        assert len(calls) == 1
+        assert api.get("/v1/private/books", headers=AUTH).json()["total"] == 0
+
+
+@pytest.mark.parametrize("limit, value, message", [
+    ("MAX_DOCUMENT_TEXT_BYTES", 10, "output limit"),
+    ("MAX_EPUB_WORK_BYTES", 100, "work limit"),
+    ("MAX_CHAPTERS", 1, "spine references"),
+    ("MAX_PAGES", 1, "too many pages"),
+])
+def test_incremental_epub_work_output_and_reference_limits(tmp_path, monkeypatch, limit, value, message):
+    monkeypatch.setattr("quietleaf_service.private_library." + limit, value)
+    with TestClient(make_app([], TOKEN, tmp_path)) as api:
+        response = upload(api, "bounded.epub", epub(images=limit == "MAX_PAGES"))
+        assert response.status_code == 422 and message in response.json()["detail"]
+        assert api.get("/v1/private/books", headers=AUTH).json()["total"] == 0

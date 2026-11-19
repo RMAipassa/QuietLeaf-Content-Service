@@ -208,9 +208,9 @@ def test_deletion_and_storage_limit(tmp_path):
 
 
 def test_archive_writes_require_token(tmp_path):
-    with TestClient(make_app([ExampleSource()], "", tmp_path)) as api:
-        assert api.post("/v1/archive/fixture/test-story").status_code == 403
-        assert api.get("/v1/archive/books").status_code == 403
+    import pytest
+    with pytest.raises(ValueError, match="authentication"):
+        make_app([ExampleSource()], "", tmp_path)
 
 
 def test_experimental_novelping_adapter_can_feed_the_archive_using_fixture_html(tmp_path):

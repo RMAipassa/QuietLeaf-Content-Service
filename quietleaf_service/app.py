@@ -13,7 +13,6 @@ import time
 from contextlib import asynccontextmanager
 from ipaddress import ip_address
 from pathlib import Path
-from threading import Lock
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
@@ -36,6 +35,8 @@ from .wtrlab import WtrLabSource
 from .private_library import MAX_UPLOAD_BYTES, PrivateLibrarySource
 from .metadata import publication_status
 from .library_sort import BookSort, book_sort_key
+from .login_limits import LoginLimits
+from .document_limits import document_preflight
 
 
 class BookSelection(BaseModel):
@@ -79,16 +80,20 @@ class OperationalConfiguration(BaseModel):
 ADMIN_COOKIE = "quietleaf_admin"
 ADMIN_SESSION_SECONDS = 30 * 24 * 60 * 60
 ADMIN_LOGIN_BODY_BYTES = 16 * 1024
-LOGIN_ATTEMPT_LIMIT = 5
-LOGIN_ATTEMPT_WINDOW = 5 * 60
-MAX_TRACKED_LOGIN_ADDRESSES = 4096
+ADMIN_LOGIN_BODY_SECONDS = 10
 
 
 def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = None,
              archive_max_bytes: int = 2 * 1024 * 1024 * 1024,
              follow_interval: int = 3600, active_interval: int = 1800,
               admin_password: str = "", archive_concurrency: int = 3,
-              private_max_bytes: int = 10 * 1024 ** 3, private_max_upload_bytes: int = MAX_UPLOAD_BYTES) -> FastAPI:
+               private_max_bytes: int = 10 * 1024 ** 3, private_max_upload_bytes: int = MAX_UPLOAD_BYTES,
+               allow_anonymous_sample: bool = False) -> FastAPI:
+    if not (token or admin_password):
+        if not allow_anonymous_sample:
+            raise ValueError("Configure API/admin authentication; anonymous sample mode must be explicitly enabled")
+        if archive_dir is not None or any(isinstance(source, PrivateLibrarySource) for source in sources):
+            raise ValueError("Anonymous sample mode cannot open persistent archive/private storage")
     if admin_password and not 12 <= len(admin_password) <= 1024:
         raise ValueError("Admin password must contain between 12 and 1024 characters")
     archive = ArchiveStore(
@@ -140,8 +145,8 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
         p=1,
         dklen=32,
     ) if effective_admin_password else b""
-    failed_logins: dict[str, list[float]] = {}
-    failed_login_lock = Lock()
+    login_limits = LoginLimits()
+    app.state.login_limits = login_limits
     public_paths = {
         "/", "/admin", "/admin/", "/healthz",
         "/admin/assets/admin.css", "/admin/assets/admin.js",
@@ -172,30 +177,6 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
         return (secrets.compare_digest(supplied_signature_bytes, expected_signature) and
                 expires >= int(time.time()))
 
-    def login_retry_after(address: str) -> int:
-        now = time.monotonic()
-        with failed_login_lock:
-            for stored_address, attempts in list(failed_logins.items()):
-                recent = [attempt for attempt in attempts if now - attempt < LOGIN_ATTEMPT_WINDOW]
-                if recent:
-                    failed_logins[stored_address] = recent
-                else:
-                    failed_logins.pop(stored_address, None)
-            recent = failed_logins.get(address, [])
-            if len(recent) < LOGIN_ATTEMPT_LIMIT:
-                return 0
-            return max(1, int(LOGIN_ATTEMPT_WINDOW - (now - recent[0])))
-
-    def record_failed_login(address: str) -> None:
-        with failed_login_lock:
-            if address not in failed_logins and len(failed_logins) >= MAX_TRACKED_LOGIN_ADDRESSES:
-                failed_logins.pop(next(iter(failed_logins)))
-            failed_logins.setdefault(address, []).append(time.monotonic())
-
-    def clear_failed_logins(address: str) -> None:
-        with failed_login_lock:
-            failed_logins.pop(address, None)
-
     def use_secure_cookie(request: Request) -> bool:
         forwarded_scheme = request.headers.get("x-forwarded-proto", "").partition(",")[0].strip()
         if request.url.scheme == "https" or forwarded_scheme == "https":
@@ -218,12 +199,14 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
             valid_session = valid_admin_session(request.cookies.get(ADMIN_COOKIE, ""))
             if not valid_bearer and not valid_session:
                 return JSONResponse({"detail": "Authentication required"}, status_code=401,
-                                    headers={"WWW-Authenticate": "Bearer"})
+                                    headers={"WWW-Authenticate": "Bearer", "Cache-Control": "private, no-store",
+                                             "X-Content-Type-Options": "nosniff"})
             if (valid_session and not valid_bearer and request.method not in {"GET", "HEAD"} and
                     request.headers.get("x-quietleaf-admin") != "1"):
-                return JSONResponse({"detail": "Admin request confirmation required"}, status_code=403)
+                return JSONResponse({"detail": "Admin request confirmation required"}, status_code=403,
+                                    headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
         response = await call_next(request)
-        if request.url.path.startswith(("/v1/private/", "/v1/books/private/", "/v1/reader/", "/v1/reading-progress")):
+        if request.url.path.startswith("/v1/"):
             response.headers["Cache-Control"] = "private, no-store"
             response.headers["X-Content-Type-Options"] = "nosniff"
         if request.url.path in protected_response_paths:
@@ -269,45 +252,45 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
         if not effective_admin_password:
             raise HTTPException(status_code=503, detail="Admin password is not configured")
         address = request.client.host if request.client else "unknown"
-        retry_after = login_retry_after(address)
+        retry_after = login_limits.reserve(address)
         if retry_after:
             raise HTTPException(status_code=429, detail="Too many login attempts",
                                 headers={"Retry-After": str(retry_after)})
+        success = False
         try:
-            declared_size = int(request.headers.get("content-length", "0"))
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid request size")
-        if declared_size > ADMIN_LOGIN_BODY_BYTES:
-            raise HTTPException(status_code=413, detail="Login request is too large")
-        body = bytearray()
-        async for chunk in request.stream():
-            if len(body) + len(chunk) > ADMIN_LOGIN_BODY_BYTES:
+            try:
+                declared_size = int(request.headers.get("content-length", "0"))
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid request size")
+            if declared_size < 0 or declared_size > ADMIN_LOGIN_BODY_BYTES:
                 raise HTTPException(status_code=413, detail="Login request is too large")
-            body.extend(chunk)
-        try:
-            login_data = json.loads(body)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            raise HTTPException(status_code=422, detail="Password is required")
-        password = login_data.get("password") if isinstance(login_data, dict) else None
-        if not isinstance(password, str) or not 1 <= len(password) <= 1024:
-            raise HTTPException(status_code=422, detail="Password is required")
-        valid = secrets.compare_digest(
-            password.encode("utf-8"), effective_admin_password.encode("utf-8")
-        )
-        if not valid:
-            record_failed_login(address)
-            raise HTTPException(status_code=401, detail="Invalid admin password")
-        clear_failed_logins(address)
-        response.set_cookie(
-            ADMIN_COOKIE,
-            issue_admin_session(),
-            max_age=ADMIN_SESSION_SECONDS,
-            path="/",
-            secure=use_secure_cookie(request),
-            httponly=True,
-            samesite="strict",
-        )
-        return {"authenticated": True, "expiresInSeconds": ADMIN_SESSION_SECONDS}
+            body = bytearray()
+            try:
+                async with asyncio.timeout(ADMIN_LOGIN_BODY_SECONDS):
+                    async for chunk in request.stream():
+                        if len(body) + len(chunk) > ADMIN_LOGIN_BODY_BYTES:
+                            raise HTTPException(status_code=413, detail="Login request is too large")
+                        body.extend(chunk)
+            except TimeoutError:
+                raise HTTPException(status_code=408, detail="Login request timed out")
+            try:
+                login_data = json.loads(body)
+                password = login_data.get("password") if isinstance(login_data, dict) else None
+                if not isinstance(password, str) or not 1 <= len(password) <= 1024:
+                    raise ValueError
+                password_bytes = password.encode("utf-8")
+            except (ValueError, UnicodeError, RecursionError):
+                raise HTTPException(status_code=422, detail="Password is required")
+            if not secrets.compare_digest(password_bytes, effective_admin_password.encode("utf-8")):
+                raise HTTPException(status_code=401, detail="Invalid admin password")
+            success = True
+            response.set_cookie(
+                ADMIN_COOKIE, issue_admin_session(), max_age=ADMIN_SESSION_SECONDS, path="/",
+                secure=use_secure_cookie(request), httponly=True, samesite="strict",
+            )
+            return {"authenticated": True, "expiresInSeconds": ADMIN_SESSION_SECONDS}
+        finally:
+            login_limits.release(address, success=success)
 
     @app.post("/admin/logout", include_in_schema=False)
     def admin_logout(request: Request, response: Response):
@@ -528,11 +511,16 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
         if not (token or admin_password):
             raise HTTPException(status_code=403, detail="Configure API/admin authentication before inspecting diagnostics")
         packages = {}
-        for package in ("camoufox", "playwright"):
+        for package in ("Pillow", "cryptography", "pypdfium2", "fastapi", "starlette", "uvicorn", "camoufox", "playwright"):
             try:
                 packages[package] = importlib.metadata.version(package)
             except importlib.metadata.PackageNotFoundError:
                 packages[package] = None
+        try:
+            from pypdfium2 import PDFIUM_INFO
+            packages["PDFium"] = str(PDFIUM_INFO)
+        except ImportError:
+            packages["PDFium"] = None
         source_status = []
         private_values = {value for value in (token, admin_password) if value}
         for source in sources:
@@ -561,7 +549,9 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
                 job["error"] = job["error"].replace(private, "[redacted]")
         return JSONResponse({"releaseVersion": __version__, "pythonVersion": sys.version.split()[0],
                              "platform": sys.platform, "sources": source_status,
-                             "browserPackages": packages,
+                             "browserPackages": {name: packages[name] for name in ("camoufox", "playwright")},
+                             "dependencyVersions": packages,
+                             "documentProcessing": document_preflight(),
                              "archiveWorkerRunning": bool(worker and worker.is_running()),
                              "activeArchiveJobs": worker.active_count() if worker else 0,
                              "activeJobs": active_jobs, "recentJobs": jobs}, headers={"Cache-Control": "private, no-store"})
@@ -868,6 +858,16 @@ def make_app(sources: list[Source], token: str = "", archive_dir: Path | None = 
 
 def build_from_env() -> FastAPI:
     load_dotenv(Path.cwd() / ".env", override=False)
+    token = os.getenv("QUIETLEAF_API_TOKEN", "")
+    admin_password = os.getenv("QUIETLEAF_ADMIN_PASSWORD", "")
+    anonymous_sample = (not (token or admin_password) and
+                        os.getenv("QUIETLEAF_ALLOW_ANONYMOUS_SAMPLE", "").lower() in {"1", "true", "yes"})
+    if not (token or admin_password) and not anonymous_sample:
+        raise ValueError("Configure QUIETLEAF_API_TOKEN or QUIETLEAF_ADMIN_PASSWORD before starting the service")
+    if anonymous_sample and (os.getenv("QUIETLEAF_ARCHIVE_DIR", "") or os.getenv("QUIETLEAF_HTML_SOURCES", "") or
+                             any(os.getenv(name, "").lower() in {"1", "true", "yes"} for name in
+                                 ("QUIETLEAF_ENABLE_NOVELPING", "QUIETLEAF_ENABLE_WTRLAB"))):
+        raise ValueError("Anonymous sample mode cannot use archive storage or live source adapters")
     root = Path(os.getenv("QUIETLEAF_CATALOG_DIR", str(Path(__file__).resolve().parent.parent / "catalog")))
     sources: list[Source] = [CatalogSource(root)]
     config_path = os.getenv("QUIETLEAF_HTML_SOURCES", "")
@@ -894,19 +894,20 @@ def build_from_env() -> FastAPI:
             session_cookie=os.getenv("QUIETLEAF_WTRLAB_COOKIE", ""),
             **browser_options,
         ))
-    archive_dir = Path(os.getenv("QUIETLEAF_ARCHIVE_DIR", str(Path(__file__).resolve().parent.parent / "archive")))
+    archive_dir = None if anonymous_sample else Path(os.getenv("QUIETLEAF_ARCHIVE_DIR", str(Path(__file__).resolve().parent.parent / "archive")))
     archive_cap = int(os.getenv("QUIETLEAF_ARCHIVE_MAX_BYTES", str(2 * 1024 * 1024 * 1024)))
     return make_app(
         sources,
-        token=os.getenv("QUIETLEAF_API_TOKEN", ""),
+        token=token,
         archive_dir=archive_dir,
         archive_max_bytes=archive_cap,
         follow_interval=int(os.getenv("QUIETLEAF_FOLLOW_INTERVAL_SECONDS", "3600")),
         active_interval=int(os.getenv("QUIETLEAF_ACTIVE_INTERVAL_SECONDS", "1800")),
-        admin_password=os.getenv("QUIETLEAF_ADMIN_PASSWORD", ""),
+        admin_password=admin_password,
         archive_concurrency=int(os.getenv("QUIETLEAF_ARCHIVE_CONCURRENCY", "3")),
         private_max_bytes=int(os.getenv("QUIETLEAF_PRIVATE_MAX_BYTES", str(10 * 1024 ** 3))),
         private_max_upload_bytes=int(os.getenv("QUIETLEAF_PRIVATE_MAX_UPLOAD_BYTES", str(MAX_UPLOAD_BYTES))),
+        allow_anonymous_sample=anonymous_sample,
     )
 
 

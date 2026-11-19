@@ -280,7 +280,7 @@ def test_refresh_failure_does_not_block_other_sources():
 
 def test_home_worker_can_run_a_second_lifespan():
     source = RestartableHomeSource()
-    app = make_app([source])
+    app = make_app([source], allow_anonymous_sample=True)
     worker = app.state.home_feed_worker
 
     with TestClient(app) as client:

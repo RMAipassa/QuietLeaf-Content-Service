@@ -84,6 +84,8 @@ openssl rand -hex 32
 
 QuietLeaf loads this file directly from the Python App Runner working directory. Normal process environment variables take precedence over values in `.env`.
 
+Since v0.16.4, startup fails before opening persistent storage if both API token and admin password are absent. Retain your existing credentials and working-directory settings during updates; do not enable anonymous sample mode for this persistent deployment. `QUIETLEAF_ALLOW_ANONYMOUS_SAMPLE=1` is an explicit stateless development-only opt-in and refuses archive/live-source configuration.
+
 Use a separate admin password containing at least 12 characters. If it is omitted, the dashboard temporarily accepts `QUIETLEAF_API_TOKEN` as its password so an upgrade cannot lock you out.
 
 Only enable NovelPing after confirming you are authorized to access and automate that source:
@@ -146,6 +148,8 @@ curl -X DELETE -H "Authorization: Bearer YOUR_TOKEN" \
 The request waits for the current or requested refresh cycle to finish, while concurrent home reads keep serving the previous snapshot. Multiple manual requests coalesce and do not overlap upstream work.
 
 If startup fails with a missing package, run AMP's **Update** action again and confirm the setup command completed successfully. Do not add a second Uvicorn worker to work around startup issues.
+
+Authenticated `/v1/diagnostics` reports `dependencyVersions` (including Pillow, cryptography, pypdfium2/PDFium, Camoufox and Playwright) and `documentProcessing.ready`. Raster/PDF parser children must be able to use nested Windows Job Objects or POSIX resource limits; they refuse processing otherwise. Limits are 768 MiB memory, 20 seconds user CPU and 35 seconds wall time. The children do not inherit QuietLeaf credentials and a parser crash does not terminate the API, but they still run as the same OS account: keep that account low-privilege and maintain native/OS/browser updates. No production upload is necessary to inspect parser-limit readiness.
 
 ## 6. Configure Cloudflare Tunnel
 

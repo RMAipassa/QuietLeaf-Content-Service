@@ -119,7 +119,7 @@ def test_aggregate_search_survives_failed_source():
             raise RuntimeError("Connection refused")
 
     catalog = CatalogSource(Path(__file__).parent.parent / "catalog")
-    client = TestClient(make_app([catalog, OfflineSource()]))
+    client = TestClient(make_app([catalog, OfflineSource()], allow_anonymous_sample=True))
     result = client.get("/v1/search", params={"q": "lighthouse"}).json()
     assert result["items"][0]["id"] == "lighthouse-demo"
     assert result["errors"] == [{"source": "offline", "message": "Source temporarily unavailable"}]
@@ -183,7 +183,7 @@ def test_home_feed_sections_are_bounded_across_sources():
             } for number in range(15)]
             return {category: items for category in ("popular", "completed", "fresh", "new", "hot")}
 
-    with TestClient(make_app([HomeSource("first"), HomeSource("second")])) as home_client:
+    with TestClient(make_app([HomeSource("first"), HomeSource("second")], allow_anonymous_sample=True)) as home_client:
         result = home_client.get("/v1/home").json()
 
     assert all(len(result[category]) == 20

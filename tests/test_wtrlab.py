@@ -560,6 +560,7 @@ def test_wtrlab_available_through_existing_android_api():
 
 
 def test_build_from_env_requires_authorization_flag(tmp_path, monkeypatch):
+    monkeypatch.setenv("QUIETLEAF_API_TOKEN", "source-authorization-test-token")
     catalog = tmp_path / "catalog"
     catalog.mkdir()
     (catalog / "catalog.json").write_text('{"name":"Test","books":[]}', encoding="utf-8")

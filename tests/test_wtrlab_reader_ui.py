@@ -140,7 +140,7 @@ def test_diagnostics_are_authenticated_safe_and_show_the_actual_mode(tmp_path, m
 
 
 def test_diagnostics_require_configured_authentication():
-    with TestClient(make_app([])) as api:
+    with TestClient(make_app([], allow_anonymous_sample=True)) as api:
         assert api.get("/v1/diagnostics").status_code == 403
 
 

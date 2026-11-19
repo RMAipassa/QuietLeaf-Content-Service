@@ -17,16 +17,20 @@ from urllib.parse import unquote, urlsplit
 
 from bs4 import BeautifulSoup
 from defusedxml import ElementTree
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, PngImagePlugin
 
 from .adapters import MAX_TEXT_BYTES, SourceError, require_id
 from .library_sort import BookSort, book_order
+from .document_limits import MAX_IMAGE_METADATA_BYTES, render_document, validate_raster
 
 
 MAX_UPLOAD_BYTES = 100_000_000
 MAX_ENTRY_BYTES = 32 * 1024 * 1024
 MAX_EXPANDED_BYTES = 512 * 1024 * 1024
 MAX_PAGES = 2000
+MAX_CHAPTERS = 10000
+MAX_EPUB_WORK_BYTES = 64 * 1024 * 1024
+MAX_DOCUMENT_TEXT_BYTES = 32 * 1024 * 1024
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 PDF_LOCK = threading.Lock()
 
@@ -62,8 +66,21 @@ def read_entry(archive: zipfile.ZipFile, name: str, limit: int = MAX_ENTRY_BYTES
 
 
 def jpeg_page(data: bytes, max_edge: int = 2400) -> bytes:
+    validate_raster(data)
+    return render_document("image", data, edge=max_edge)
+
+
+def _decode_jpeg_page(data: bytes, max_edge: int = 2400) -> bytes:
+    format_name = validate_raster(data)
     try:
-        with Image.open(io.BytesIO(data)) as image:
+        PngImagePlugin.MAX_TEXT_CHUNK = MAX_IMAGE_METADATA_BYTES
+        PngImagePlugin.MAX_TEXT_MEMORY = MAX_IMAGE_METADATA_BYTES
+        with Image.open(io.BytesIO(data), formats=[format_name]) as image:
+            if image.format != format_name:
+                raise SourceError("Unsupported decoded image format")
+            if sum(len(value.encode("utf-8")) if isinstance(value, str) else len(value)
+                   for value in image.info.values() if isinstance(value, (str, bytes))) > MAX_IMAGE_METADATA_BYTES:
+                raise SourceError("The image page metadata is too large")
             if image.width * image.height > 40_000_000 or min(image.size) < 1:
                 raise SourceError("The image page dimensions are too large")
             image = ImageOps.exif_transpose(image)
@@ -85,6 +102,20 @@ def jpeg_page(data: bytes, max_edge: int = 2400) -> bytes:
 
 
 def pdf_page(path: Path, index: int, max_edge: int = 2400) -> bytes:
+    with PDF_LOCK:
+        return render_document("pdf-page", json.dumps({"path": str(path)}).encode(), edge=max_edge, index=index)
+
+
+def _pdf_page_count(path: Path) -> int:
+    import pypdfium2 as pdfium
+    with pdfium.PdfDocument(str(path)) as document:
+        count = len(document)
+    if not 0 < count <= MAX_PAGES:
+        raise SourceError("The PDF page count is unsupported")
+    return count
+
+
+def _render_pdf_page(path: Path, index: int, max_edge: int = 2400) -> bytes:
     import pypdfium2 as pdfium
 
     try:
@@ -120,18 +151,37 @@ def resolve_epub(base: str, href: str) -> str | None:
 
 
 def parse_epub(archive: zipfile.ZipFile, items: dict) -> dict:
+    work_bytes = text_bytes = references = 0
+    seen_resources = set()
+
+    def epub_entry(name):
+        nonlocal work_bytes
+        size = items[name].file_size
+        if work_bytes + size > MAX_EPUB_WORK_BYTES:
+            raise SourceError("The EPUB exceeds the parsing work limit")
+        data = read_entry(archive, name, MAX_TEXT_BYTES)
+        work_bytes += len(data)
+        if work_bytes > MAX_EPUB_WORK_BYTES:
+            raise SourceError("The EPUB exceeds the parsing work limit")
+        return data
+
+    def append_page(name):
+        if len(pages) >= MAX_PAGES:
+            raise SourceError("The EPUB has too many pages")
+        pages.append(name)
+
     if "META-INF/encryption.xml" in items:
-        encrypted = ElementTree.fromstring(read_entry(archive, "META-INF/encryption.xml", MAX_TEXT_BYTES))
+        encrypted = ElementTree.fromstring(epub_entry("META-INF/encryption.xml"))
         for node in encrypted.iter():
             if node.tag.rsplit("}", 1)[-1] == "CipherReference":
                 path = unquote(urlsplit(node.attrib.get("URI", "")).path)
                 if PurePosixPath(path).suffix.lower() not in {".ttf", ".otf", ".woff", ".woff2"}:
                     raise SourceError("This EPUB has encrypted content; upload an unlocked EPUB")
-    container = ElementTree.fromstring(read_entry(archive, "META-INF/container.xml", MAX_TEXT_BYTES))
+    container = ElementTree.fromstring(epub_entry("META-INF/container.xml"))
     rootfile = next((node.attrib.get("full-path") for node in container.iter() if node.tag.rsplit("}", 1)[-1] == "rootfile"), None)
     if rootfile not in items:
         raise SourceError("EPUB package was not found")
-    package = ElementTree.fromstring(read_entry(archive, rootfile, MAX_TEXT_BYTES))
+    package = ElementTree.fromstring(epub_entry(rootfile))
     manifest = {}
     title = author = ""
     for node in package.iter():
@@ -146,16 +196,22 @@ def parse_epub(archive: zipfile.ZipFile, items: dict) -> dict:
     for node in package.iter():
         if node.tag.rsplit("}", 1)[-1] != "itemref":
             continue
+        references += 1
+        if references > MAX_CHAPTERS:
+            raise SourceError("The EPUB has too many spine references")
         item = manifest.get(node.attrib.get("idref"), {})
         path = resolve_epub(rootfile, item.get("href", ""))
         if not path or path not in items:
             continue
+        if path in seen_resources:
+            raise SourceError("The EPUB spine contains repeated document resources")
+        seen_resources.add(path)
         if item.get("media-type") in {"image/jpeg", "image/png", "image/webp", "image/gif"}:
-            pages.append(path)
+            append_page(path)
             continue
         if item.get("media-type") not in {"application/xhtml+xml", "text/html", "image/svg+xml"}:
             continue
-        page = BeautifulSoup(read_entry(archive, path, MAX_TEXT_BYTES), "html.parser")
+        page = BeautifulSoup(epub_entry(path), "html.parser")
         for element in page.select("script, style, noscript, nav"):
             element.decompose()
         heading = page.select_one("h1, h2") or page.select_one("title")
@@ -163,7 +219,7 @@ def parse_epub(archive: zipfile.ZipFile, items: dict) -> dict:
             href = image.get("src") or image.get("xlink:href") or image.get("href") or ""
             resolved = resolve_epub(path, href)
             if resolved in items and PurePosixPath(resolved).suffix.lower() in IMAGE_SUFFIXES:
-                pages.append(resolved)
+                append_page(resolved)
         for line_break in page.find_all("br"):
             line_break.replace_with("\n")
         body = page.body or page
@@ -174,6 +230,10 @@ def parse_epub(archive: zipfile.ZipFile, items: dict) -> dict:
         text = "\n".join(line.strip() for line in text.splitlines())
         text = re.sub(r"\n{3,}", "\n\n", text).strip()
         if text:
+            size = len(text.encode("utf-8"))
+            if size > MAX_TEXT_BYTES or text_bytes + size > MAX_DOCUMENT_TEXT_BYTES or len(chapters) >= MAX_CHAPTERS:
+                raise SourceError("The EPUB exceeds the chapter/text output limit")
+            text_bytes += size
             chapters.append({"title": heading.get_text(" ", strip=True) if heading else f"Chapter {len(chapters) + 1}", "text": text})
     if pages and sum(len(chapter["text"]) for chapter in chapters) <= max(1000, 100 * len(pages)):
         return {"mediaType": "epub-images", "pages": pages, "chapters": [], "title": title, "author": author}
@@ -336,13 +396,15 @@ class PrivateLibrarySource:
                 try:
                     manifest = self._parse(original, extension)
                     chapters = manifest.get("chapters", [])
+                    if len(chapters) > MAX_CHAPTERS or not 0 <= manifest.get("pageCount", 0) <= MAX_PAGES:
+                        raise SourceError("The document has too many chapters or pages")
+                    written = 0
                     for number, chapter in enumerate(chapters):
                         data = chapter.pop("text").encode("utf-8")
-                        if len(data) > MAX_TEXT_BYTES:
+                        written += len(data)
+                        if len(data) > MAX_TEXT_BYTES or written > MAX_DOCUMENT_TEXT_BYTES:
                             raise SourceError("An imported chapter exceeds the size limit")
                         (target / f"chapter-{number + 1}.txt").write_bytes(data)
-                    if len(chapters) > 10000 or not 0 <= manifest.get("pageCount", 0) <= MAX_PAGES:
-                        raise SourceError("The document has too many chapters or pages")
                     used = sum(path.stat().st_size for path in target.iterdir())
                     with self._connect() as db:
                         total = db.execute("SELECT COALESCE(SUM(stored_bytes),0) FROM books").fetchone()[0]
@@ -386,11 +448,8 @@ class PrivateLibrarySource:
                     "chapters": [{"title": "Complete book" if len(parts) == 1 else f"Part {index + 1}", "text": part}
                                  for index, part in enumerate(parts)], "pages": []}
         if extension == ".pdf":
-            import pypdfium2 as pdfium
-            with PDF_LOCK, pdfium.PdfDocument(str(original)) as document:
-                count = len(document)
-            if not 0 < count <= MAX_PAGES:
-                raise SourceError("The PDF page count is unsupported")
+            with PDF_LOCK:
+                count = json.loads(render_document("pdf-info", json.dumps({"path": str(original)}).encode()))["pageCount"]
             (original.parent / "cover.jpg").write_bytes(pdf_page(original, 0, 600))
             return {"mediaType": "pdf", "pageCount": count, "chapters": [], "pages": []}
         with zipfile.ZipFile(original) as archive:
@@ -406,6 +465,12 @@ class PrivateLibrarySource:
                 raise SourceError("The document has no supported pages or too many pages")
             manifest["pageCount"] = len(pages)
             cover = manifest.pop("coverEntry", None) or (pages[0] if pages else None)
+            image_work = 0
+            for name in dict.fromkeys([*pages, *([cover] if cover else [])]):
+                image_work += items[name].file_size
+                if image_work > MAX_EXPANDED_BYTES:
+                    raise SourceError("The document exceeds the image processing work limit")
+                validate_raster(read_entry(archive, name))
             if cover:
                 (original.parent / "cover.jpg").write_bytes(jpeg_page(read_entry(archive, cover), 600))
             if manifest["mediaType"] == "epub-images":
